@@ -63,7 +63,8 @@ for await (const [space, message] of app.messages) {
 `onDirectText` resolves the sender's active plan and hands the raw text straight to B — A never parses message text:
 
 ```ts
-const { slots, missing, reply } = await handleDM({ planId, userId, text });
+const store = await openStore();                     // once at startup, not per message
+const { slots, missing, reply } = await handleDM({ planId, userId, text }, store);
 await space.send(reply);                            // B writes the DM copy
 ```
 
@@ -79,20 +80,27 @@ await space.send(reply);                            // B writes the DM copy
 | State | A does | Calls into B |
 |---|---|---|
 | `collecting` | Per DM, ask B to fill slots; when every participant's `missing` is empty, advance | `handleDM` |
-| `negotiating` | Merge, filter, assign times, request scores, log the round, pick | `mergeConstraints`, `filterVenues`, `score` |
+| `negotiating` | Merge, filter, assign times, request scores, log the round, pick | `mergeConstraints`, `travelProfiles`, `filterVenues`, `scoreCandidates` |
 | `proposed` | Post the plan card with a message effect; wait for tapbacks | — |
 | `confirmed` | Post confirmation | — |
 
 The negotiating step in order:
 
 ```ts
-const merged   = mergeConstraints(participantSlots);        // three keys only
-const filtered = filterVenues(venues, merged, people);      // B owns this
-const plan     = { roundId, candidates: filtered.survivors.map(s => ({
-                    venueId: s.venueId, time: pickTime(merged.window), estCostUSD: costOf(s.venueId) })) };
-const evals    = await Promise.all(participants.map(p => score(p, plan)));  // parallel
-await appendRound({ planId, round, candidates: /* pass/fail + scores */ });  // B's screen reads this
-const chosen   = select(plan.candidates, evals, filtered.survivors);
+const people   = participants.map(p => ({ userId: p.userId, slots: p.slots }));  // Participant[]
+const merged   = mergeConstraints(people);                   // three keys only
+const filtered = filterVenues(VENUES, merged, travelProfiles(people));
+
+// One call per person, over the survivors. Scoring does not need the time.
+const evals    = await Promise.all(people.map(p => scoreCandidates(filtered.survivors, {
+                   slots: p.slots, tastes: tastesOf(p), preferredSpots: spotsOf(p) })));
+
+await store.appendRound({ planId, round, at: new Date().toISOString(),
+                          candidates: /* survivors + scores, rejected + failedOn */ });
+
+const chosen   = select(filtered.survivors, evals);          // A's rule, below
+const card     = { venueId: chosen.venueId, time: pickTime(merged.window),
+                   estCostUSD: venueById(chosen.venueId)!.estCostUSD };
 ```
 
 Empty `survivors`, or every candidate failing, is the flex-whisper branch (stretch) — otherwise post the "nothing fits" message and go back to `collecting`.
@@ -111,6 +119,54 @@ const best = candidates
 ```
 
 `longestTravelMin` is an aggregate whose person is unlabeled, which is how "minimize the longest commute" works without A ever seeing anyone's home or travel cap.
+
+## Calling into B's code
+
+**A adds no type definitions.** All nine contract shapes are already exported from `src/contracts.ts` on `main`. Import them; never redeclare them.
+
+This repo has `verbatimModuleSyntax` and `allowImportingTsExtensions` on, so types need `import type` and every path needs its `.ts` extension. Omitting either fails the typecheck with an error that does not say why:
+
+```ts
+import type { Evaluation, MergedConstraints, RoundLog } from "./contracts.ts";
+import { VENUES, filterVenues, venueById } from "./venues.ts";
+```
+
+### Functions that already exist and pass their tests
+
+| Import from | Signature |
+|---|---|
+| `./db.ts` | `openStore(): Promise<Store>` — Mongo when `MONGODB_URI` is set, else in memory |
+| `./slots.ts` | `handleDM(input: HandleDMInput, store: Store): Promise<HandleDMResult>` |
+| `./aggregator.ts` | `mergeConstraints(people: Participant[], day?: Date): MergedConstraints` |
+| `./aggregator.ts` | `travelProfiles(people: Participant[]): TravelProfile[]` |
+| `./aggregator.ts` | `hasOverlap(window: TimeWindow): boolean` — false means no shared time |
+| `./venues.ts` | `filterVenues(venues: Venue[], merged: MergedConstraints, people: TravelProfile[]): FilterResult` |
+| `./venues.ts` | `VENUES: Venue[]` (50 of them), `venueById(id): Venue \| undefined` |
+| `./agent/score.ts` | `scoreCandidates(survivors: Survivor[], ctx: ScoreContext): Promise<Evaluation[]>` |
+
+`Participant` is `{ userId: string; slots: Slots }`; `ScoreContext` is `{ slots: Slots; tastes: string[]; preferredSpots: string[] }`.
+
+Two that are easy to call wrongly:
+
+- **`handleDM` takes the store as a second argument.** It loads existing slots, seeds from the standing profile and persists, so A never reads or writes slots directly.
+- **`filterVenues` takes `TravelProfile[]`, not participants.** Build it with `travelProfiles(people)`. Homes and travel caps live inside that array and never reach A's own logic — that is the mechanism behind the privacy claim, not a convention.
+
+### The four things A writes
+
+1. **The router** (contract 2) — resolve sender and active plan, call `handleDM`, send `reply` verbatim.
+2. **The candidate builder** (contract 5) — pair the chosen venue with a time from `merged.window`.
+3. **The round append** (contract 7) — `store.appendRound(round)` every round. Until this lands, B's screen renders `DEMO_ROUNDS` fixtures.
+4. **The join flow and the Nessie write** (contracts 8, 9).
+
+Plus the selection rule below. Everything else is a call into B's modules.
+
+### Where the code and the contract table disagree
+
+`scoreCandidates` takes `Survivor[]`, not the `CandidatePlan` that contract 5 describes — it looks venue details up itself via `venueById`. Because `hours` was dropped, the assigned time is not needed to score a venue, only to post the plan card. So contract 5 currently flows A → group message rather than A → B. **Settle this at 5pm:** either A passes survivors straight through and `CandidatePlan` becomes A-internal, or B widens the scorer to accept it.
+
+### What has no running code yet
+
+Contracts 1, 3, 4 and 6 are implemented and covered by `npm run harness` (19 assertions, green with no API keys and no Atlas). Contract 2 is implemented but **never exercised** — `handleDM` has no test. Contracts 5, 7 and 9 are types with nothing behind them on either side, which makes them the three to walk through first.
 
 ## Contracts, from A's side
 
