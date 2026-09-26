@@ -2,112 +2,132 @@
 
 ## Context
 
-DivHacks build night, 4pm–12am. The shared build plan doc splits the work two ways: **A owns messaging and flow** (Spectrum, router, join link, orchestrator state machine, Nessie); **B owns agents, data and screen** (Grok extraction and scoring, aggregator, venues, backroom screen). B's lane is in `plan-teammate-b.md` in this folder.
+DivHacks build night, 4pm–12am. **A owns messaging and flow** (Spectrum, router, join codes, orchestrator state machine, Nessie); **B owns agents, data and screen** (Grok extraction and scoring, aggregator, venues, backroom screen). B's lane is in `plan-teammate-b.md` in this folder.
 
-A's lane carries the project's biggest risk, which is why the doc says to verify the iMessage group + DM flow before building anything on top of it. Good news below: most of that verification is already done from the installed types, and the one risk the doc worried about most turns out not to exist.
+**Photon constraint (settled):** hackathon credits are **Spectrum Cloud Pro**, not Business. Pro is a **shared-pool 1:1 iMessage line**. Group create and a dedicated bot-in-the-group number are Business-only. We do **not** pivot the product. We drop Unsaid as a group member.
 
-**Assumption to confirm at 4pm:** one shared repo, so A imports `src/contracts.ts` from B directly and the compiler catches contract drift. If A works in a separate repo, that file gets hand-copied and nothing enforces it.
+The product read for judges: the human group chat is where social pressure lives, so Unsaid **refuses to speak there**. Constraints stay in DMs. Photon is only the pipe; attaching people to a plan is **our backend** (contract 8).
 
-## Spectrum API — verified against the installed package
+One shared repo: A imports `src/contracts.ts` from B; the compiler catches contract drift. A never edits B's modules (`contracts.ts`, `venues.ts`, `aggregator.ts`, `agent/`, `db.ts`, `backroom/`, `slots.ts`).
 
-Read out of `node_modules/@spectrum-ts/core` and `node_modules/@spectrum-ts/imessage`, so these are facts, not guesses. This is most of the doc's "verify in the first hour" list, already done.
+## Product surface on Pro
+
+| Old (needs Business group line) | What we ship on Pro |
+|---|---|
+| `@Unsaid dinner Friday?` in the group | Anyone DMs Unsaid: `dinner Friday?` (or similar) |
+| Bot posts an `sms:` join link in the group | Bot replies in the DM with a 4-char code + “paste this in the group” |
+| Bot posts the plan card in the group | Bot sends the card to **each participant DM**; optional paste blurb for the creator |
+| Tapbacks on the group card | Tapbacks (or “yes”) on the DM card |
+
+Human iMessage group stays in the **demo** as a bulletin board. Unsaid is not a member. If someone only sees the code in the group and never DMs Unsaid, they are not in the plan.
+
+Shared-pool numbers may **differ per person**. Do not depend on one global bot phone in an `sms:` URL. Source of truth: `JOIN K7M2` typed into the 1:1 they already have.
+
+## Spectrum API — still true, used differently
+
+Read out of `node_modules/@spectrum-ts/core` and `node_modules/@spectrum-ts/imessage`.
 
 | Need | How | Note |
 |---|---|---|
-| Group or DM? | `space.type` is `"dm" \| "group"` | iMessage space schema is `{ id, type, phone }` — typed, no sniffing needed |
-| Who sent it? | `message.sender.id` | Canonical platform handle (the phone). **The doc's "group sender IDs unavailable" risk does not apply** |
-| Mention-gating | `message.mentions` → `{ address, length, start }[]` | Gate group replies on our own phone appearing in `mentions` |
-| Tapback in | `message.content.type === "reaction"` | This is how confirm is detected |
-| Tapback out | `message.react(emoji)` or `space.send(reaction(emoji, msg))` | |
-| Plan card effect | `effect(content, messageEffects.confetti)` from `@spectrum-ts/imessage` | Also `fireworks`, `sparkles`, `lasers`, `balloons`, `celebration`, `echo`, `heart`, `spotlight` |
-| Participants | `space.getMembers()` | **iMessage: group only and remote only — throws on a DM.** Do not build the join flow on this |
+| Group or DM? | `space.type` is `"dm" \| "group"` | On Pro we **skip groups**. No mention-gating to build |
+| Who sent it? | `message.sender.id` | Canonical platform handle (the phone). This *is* the user id |
+| Tapback in | `message.content.type === "reaction"` | Confirm on the **DM** plan card |
+| Tapback out | `message.react(emoji)` | |
+| Plan card effect | `effect(content, …)` from `@spectrum-ts/imessage` | Works in a DM |
+| Participants | **Not** `space.getMembers()` | Throws on a DM; Pro has no group space anyway. Join codes only |
+| Outreach | `space.create(user)` / existing DM | Pro allowlist: demo phones must be registered project users |
 
-The `getMembers()` restriction is the one real gotcha: it cannot enumerate a DM, so participants must come from join codes, not from asking the platform. That is what the join code is for, and the doc's fallback row already assumes it.
+Photon does **not** have plans, join codes, or “a group of agents.” Spectrum yields `[space, message]`. We map sender → `userId` → `activePlanId` → `handleDM`.
 
-## The one thing the venue schema change pushed onto A
+## The venue schema change (unchanged)
 
-B's venue records dropped `hours` (demo scope is a single evening, so every venue is open). Consequence: **`merged.window` is not a venue filter — it is how A picks the time.** B's `filterVenues` applies budget, dietary and travel; A reads `merged.window` and assigns a time to each candidate before sending the candidate plan back to B for scoring.
+B dropped `hours` (one evening). **`merged.window` is not a venue filter — it is how A picks the time.** B's `filterVenues` applies budget, dietary and travel. A assigns a time from `merged.window` when building the card sent to each DM.
 
 ## Files
 
 ```
 src/
-  index.ts              entry: gate on space.type + mentions, dispatch
-  router.ts             group vs DM, sender -> user, user -> active plan
-  join.ts               createPlan, join code, sms: deep link
+  index.ts              entry: openStore, Spectrum iMessage, dispatch
+  router.ts             skip groups; DMs always on; JOIN/start vs handleDM
+  join.ts               createPlan, join code, attach participant, activePlanId
   orchestrator/
     machine.ts          Collecting -> Negotiating -> Proposed -> Confirmed
     select.ts           best worst-case score, tiebreak on longest commute
-    messages.ts         group copy: plan card, confirm, "nothing fits"
+    messages.ts         DM copy: plan card, confirm, "nothing fits", paste blurb
   nessie.ts             seed customers + purchases, budget anchor line
 ```
-
-B owns `contracts.ts`, `venues.ts`, `aggregator.ts`, `agent/`, `db.ts`, `backroom/`. A imports from them and never edits them.
 
 ## Router
 
 ```ts
 for await (const [space, message] of app.messages) {
+  if (message.direction === "outbound") continue;
   if (message.content.type === "reaction") { await onTapback(space, message); continue; }
   if (message.content.type !== "text") continue;
-
-  if (space.type === "group") {
-    if (!mentionsUs(message)) continue;            // mention-gated
-    await onGroupText(space, message);
-  } else {
-    await onDirectText(space, message);            // DMs always on
-  }
+  if (space.type === "group") continue;            // Pro: never a group bot
+  await onDirectText(space, message);              // DMs always on
 }
 ```
 
-`onDirectText` resolves the sender's active plan and hands the raw text straight to B — A never parses message text:
+`onDirectText` is the only inbound path. **A owns join/start parsing** (not slot text). Then A calls B:
 
 ```ts
-const store = await openStore();                     // once at startup, not per message
+const store = await openStore();                     // once at startup
 const { slots, missing, reply } = await handleDM({ planId, userId, text }, store);
-await space.send(reply);                            // B writes the DM copy
+await space.send(reply);                            // B writes slot-filling copy
 ```
 
-## Join flow
+Suggested DM commands (A, before `handleDM`):
 
-1. `@Unsaid dinner Friday?` in the group → create a plan, status `collecting`, generate a 4-character join code, post the code plus the `sms:` deep link.
-2. The link pre-fills the join code in a DM so each person's first message ties them to the plan: `sms:<bot-phone>&body=JOIN%20<code>`. iOS is inconsistent about `&body=` vs `?body=` — test both on the actual demo phones in the first hour, it is a one-character fix either way.
-3. The creator is joined implicitly and skips the link.
-4. MVP rule from the doc: one active plan per user; a new join code switches the user's active plan.
+- Start (`dinner Friday?` / `plan …` with no active plan) → create `PlanDoc`, 4-char `joinCode`, creator already in `participants`, set `activePlanId`. Reply with the code and “forward this to the group.” Then `handleDM` for slot-fill.
+- `JOIN xxxx` (or a lone 4-char code) → look up plan, append `userId` if new, set `activePlanId`. Short “you’re in,” then `handleDM` or next missing question.
+- Else → `handleDM` on `activePlanId`. If none, ask them to start a plan or paste a join code.
+
+MVP: one active plan per user; a new join code switches `activePlanId`. **Do not** `upsertUser` wholesale — B seeds `profile.preferredSpots`. Touch only `activePlanId`.
+
+When every participant on that plan has `missing.length === 0`, A advances `status` to `negotiating`. Collecting “everyone’s data” is `store.getAllSlots(planId)`, not a Photon API.
+
+## Join flow (hub and spoke)
+
+1. Creator DMs Unsaid → A creates the plan + code (creator is joined).
+2. Creator pastes the code into the **human** group chat.
+3. Each friend DMs **their** Unsaid `JOIN <code>`. Same `planId` in our store. Agents never text each other.
+4. Slot-filling stays 1:1 via `handleDM`.
+5. After negotiate, A fans the plan card out to each known participant DM (the space that last messaged, or `space.create` if needed and allowlisted).
 
 ## Orchestrator state machine
 
 | State | A does | Calls into B |
 |---|---|---|
-| `collecting` | Per DM, ask B to fill slots; when every participant's `missing` is empty, advance | `handleDM` |
+| `collecting` | Per DM, join/start then `handleDM`; when every participant's `missing` is empty, advance | `handleDM` |
 | `negotiating` | Merge, filter, assign times, request scores, log the round, pick | `mergeConstraints`, `travelProfiles`, `filterVenues`, `scoreCandidates` |
-| `proposed` | Post the plan card with a message effect; wait for tapbacks | — |
-| `confirmed` | Post confirmation | — |
+| `proposed` | Send the plan card **to each participant DM** with a message effect; wait for tapbacks | — |
+| `confirmed` | DM confirmation to each participant; optional paste line for the creator | — |
 
-The negotiating step in order:
+Negotiating step in order:
 
 ```ts
-const people   = participants.map(p => ({ userId: p.userId, slots: p.slots }));  // Participant[]
-const merged   = mergeConstraints(people);                   // three keys only
+const people   = participants.map(p => ({ userId: p.userId, slots: p.slots }));
+const merged   = mergeConstraints(people);
 const filtered = filterVenues(VENUES, merged, travelProfiles(people));
 
-// One call per person, over the survivors. Scoring does not need the time.
 const evals    = await Promise.all(people.map(p => scoreCandidates(filtered.survivors, {
                    slots: p.slots, tastes: tastesOf(p), preferredSpots: spotsOf(p) })));
 
 await store.appendRound({ planId, round, at: new Date().toISOString(),
                           candidates: /* survivors + scores, rejected + failedOn */ });
 
-const chosen   = select(filtered.survivors, evals);          // A's rule, below
+const chosen   = select(filtered.survivors, evals);
 const card     = { venueId: chosen.venueId, time: pickTime(merged.window),
                    estCostUSD: venueById(chosen.venueId)!.estCostUSD };
+// send card into each participant DM — not a group space
 ```
 
-Empty `survivors`, or every candidate failing, is the flex-whisper branch (stretch) — otherwise post the "nothing fits" message and go back to `collecting`.
+Empty `survivors`, or every candidate failing, is flex-whisper (stretch) — otherwise DM “nothing fits” and go back to `collecting`.
 
 ## Selection rule
 
-Best worst-case score, so the least-happy person is as happy as possible; ties broken by the shorter longest commute:
+Best worst-case score; ties broken by the shorter longest commute:
 
 ```ts
 const travel = new Map(survivors.map(s => [s.venueId, s.longestTravelMin]));
@@ -118,13 +138,11 @@ const best = candidates
                 || travel.get(a.c.venueId)! - travel.get(b.c.venueId)!)[0];
 ```
 
-`longestTravelMin` is an aggregate whose person is unlabeled, which is how "minimize the longest commute" works without A ever seeing anyone's home or travel cap.
+`longestTravelMin` is unlabeled. A never sees anyone’s home or travel cap.
 
 ## Calling into B's code
 
-**A adds no type definitions.** All nine contract shapes are already exported from `src/contracts.ts` on `main`. Import them; never redeclare them.
-
-This repo has `verbatimModuleSyntax` and `allowImportingTsExtensions` on, so types need `import type` and every path needs its `.ts` extension. Omitting either fails the typecheck with an error that does not say why:
+**A adds no type definitions.** Import from `src/contracts.ts`. `verbatimModuleSyntax` + `allowImportingTsExtensions`: use `import type` and `.ts` extensions.
 
 ```ts
 import type { Evaluation, MergedConstraints, RoundLog } from "./contracts.ts";
@@ -139,79 +157,75 @@ import { VENUES, filterVenues, venueById } from "./venues.ts";
 | `./slots.ts` | `handleDM(input: HandleDMInput, store: Store): Promise<HandleDMResult>` |
 | `./aggregator.ts` | `mergeConstraints(people: Participant[], day?: Date): MergedConstraints` |
 | `./aggregator.ts` | `travelProfiles(people: Participant[]): TravelProfile[]` |
-| `./aggregator.ts` | `hasOverlap(window: TimeWindow): boolean` — false means no shared time |
+| `./aggregator.ts` | `hasOverlap(window: TimeWindow): boolean` |
 | `./venues.ts` | `filterVenues(venues: Venue[], merged: MergedConstraints, people: TravelProfile[]): FilterResult` |
-| `./venues.ts` | `VENUES: Venue[]` (50 of them), `venueById(id): Venue \| undefined` |
+| `./venues.ts` | `VENUES: Venue[]`, `venueById(id): Venue \| undefined` |
 | `./agent/score.ts` | `scoreCandidates(survivors: Survivor[], ctx: ScoreContext): Promise<Evaluation[]>` |
 
 `Participant` is `{ userId: string; slots: Slots }`; `ScoreContext` is `{ slots: Slots; tastes: string[]; preferredSpots: string[] }`.
 
-Two that are easy to call wrongly:
+Easy to call wrongly:
 
-- **`handleDM` takes the store as a second argument.** It loads existing slots, seeds from the standing profile and persists, so A never reads or writes slots directly.
-- **`filterVenues` takes `TravelProfile[]`, not participants.** Build it with `travelProfiles(people)`. Homes and travel caps live inside that array and never reach A's own logic — that is the mechanism behind the privacy claim, not a convention.
+- **`handleDM` takes the store as a second argument.** A never reads or writes slots directly.
+- **`filterVenues` takes `TravelProfile[]`**, from `travelProfiles(people)`, not raw participants.
 
 ### The four things A writes
 
-1. **The router** (contract 2) — resolve sender and active plan, call `handleDM`, send `reply` verbatim.
-2. **The candidate builder** (contract 5) — pair the chosen venue with a time from `merged.window`.
-3. **The round append** (contract 7) — `store.appendRound(round)` every round. Until this lands, B's screen renders `DEMO_ROUNDS` fixtures.
-4. **The join flow and the Nessie write** (contracts 8, 9).
-
-Plus the selection rule below. Everything else is a call into B's modules.
+1. **The router** (contract 2) — skip groups; resolve sender, JOIN/start, `handleDM`, send `reply` verbatim.
+2. **The candidate builder** (contract 5) — venue + time from `merged.window`; **deliver in DMs**.
+3. **The round append** (contract 7) — `store.appendRound(round)` every round. Until this lands, B’s screen uses `DEMO_ROUNDS`.
+4. **Join + Nessie** (contracts 8, 9) — our store, not Photon.
 
 ### Where the code and the contract table disagree
 
-`scoreCandidates` takes `Survivor[]`, not the `CandidatePlan` that contract 5 describes — it looks venue details up itself via `venueById`. Because `hours` was dropped, the assigned time is not needed to score a venue, only to post the plan card. So contract 5 currently flows A → group message rather than A → B. **Settle this at 5pm:** either A passes survivors straight through and `CandidatePlan` becomes A-internal, or B widens the scorer to accept it.
+`scoreCandidates` takes `Survivor[]`, not `CandidatePlan`. Time is not needed to score, only to put on the DM card. **Settle:** A passes survivors through and treats `CandidatePlan` as A-internal (A → each DM), or B widens the scorer.
 
 ### What has no running code yet
 
-Contracts 1, 3, 4 and 6 are implemented and covered by `npm run harness` (19 assertions, green with no API keys and no Atlas). Contract 2 is implemented but **never exercised** — `handleDM` has no test. Contracts 5, 7 and 9 are types with nothing behind them on either side, which makes them the three to walk through first.
+Contracts 1, 3, 4 and 6: `npm run harness`. Contract 2: `handleDM` exists; A’s router now calls it per DM but **join codes / shared `planId` are not done** (today each sender is `solo:<userId>`). Contracts 5, 7, 9 still need A.
 
 ## Contracts, from A's side
 
-| # | Contract | A's side | Settle by |
-|---|---|---|---|
-| 1 | Slot schema + resolvers | Consume only — A never parses text | 4pm |
-| 2 | Inbound DM handoff | A calls `handleDM`, sends B's `reply` verbatim | 4pm |
-| 3 | Venue JSON + filter | A calls `filterVenues`; B implements | 4pm |
-| 4 | Merged constraints | A receives exactly `budgetCapUSD`, `requiredDietary`, `window` | 5pm |
-| 5 | Candidate plan | **A produces** — assigns the time from `merged.window` | 5pm |
-| 6 | Evaluation | A receives pass/fail + score + `needsMyHuman`. No reason, no travel | 5pm |
-| 7 | `rounds` shape | **A writes it**, B's screen reads it — agree early, it is B's unblock | 5pm |
-| 8 | `users` / `plans` | A creates the plan, owns `participants` + `status` | 5pm |
-| 9 | Nessie anchor | A writes `budgetCapUSD`, the same field the slot schema defines | 9pm |
+| # | Contract | A's side |
+|---|---|---|
+| 1 | Slot schema + resolvers | Consume only — A never parses slot text |
+| 2 | Inbound DM handoff | A calls `handleDM`, sends B's `reply` verbatim |
+| 3 | Venue JSON + filter | A calls `filterVenues`; B implements |
+| 4 | Merged constraints | A receives exactly `budgetCapUSD`, `requiredDietary`, `window` |
+| 5 | Candidate plan | **A produces** and **DMs** it; not a group post |
+| 6 | Evaluation | pass/fail + score + `needsMyHuman`. No reason, no travel |
+| 7 | `rounds` shape | **A writes it**, B's screen reads it |
+| 8 | `users` / `plans` | A creates the plan, owns `joinCode`, `participants`, `status` |
+| 9 | Nessie anchor | A writes `budgetCapUSD`, the same field the slot schema defines |
 
-**Contract 8 is the one with a silent failure mode:** B seeds ~15 preferred spots per demo user into `users`. A's join flow must not overwrite `users` wholesale — write `plans` and touch only `activePlanId` on the user.
-
-**Contract 7 is B's critical path.** Agree the `rounds` shape before dinner even if the orchestrator does not exist yet; B builds the entire backroom screen against hand-written fake rounds.
+**Contract 8 silent failure:** do not clobber `users.profile`. **Contract 7** is still B’s backroom unblock — agree the shape even before the orchestrator exists.
 
 ## Nessie
 
-Seed a mock customer plus a plausible dinner purchase history per demo phone, then the anchor line in the DM: *"You usually spend about $X on dinner. Still good?"* The reply resolves into `budgetCapUSD` through B's money resolver — the same field, never a second budget field. Sponsor requirement is that it is visible in the demo, so the line has to appear on screen during the run.
+Seed a mock customer plus dinner history per demo phone. Anchor line in the **DM**: *"You usually spend about $X on dinner. Still good?"* Reply resolves into `budgetCapUSD` through B’s money resolver. Must be visible on a phone during the demo.
 
 ## Order of work
 
-1. **4–5pm** — Spectrum Cloud project, echo bot answering in a real group chat *and* a DM, repo open in Cursor (SpaceXAI requires it), Atlas cluster. Agree contracts with B in the first 20 minutes.
-2. **5–7pm** — Router (`space.type` gate, mention gate, sender → user → active plan), join code, `sms:` link tested on the real phones.
-3. **7:30–9pm** — State machine, plan card with effect, tapback confirm, wire the router to B's agents.
-4. **9–10:30pm** — End-to-end in iMessage, bug fixes, Nessie seed + anchor line.
-5. **10:30pm–12am** — Freeze, rehearse, record the backup video.
+1. Spectrum Cloud Pro: DMs working (done). Skip group-bot verification.
+2. Replace `solo:<userId>` with create-plan + `JOIN` so two phones share one `planId`.
+3. State machine; plan card + effect + tapback **in DMs**; wire negotiate to B.
+4. End-to-end: three phones, human group without Unsaid, three Unsaid DMs, one card each.
+5. Nessie line; freeze; backup video.
 
-If a checkpoint slips more than 30 minutes, cut the next stretch item rather than pushing the schedule.
+If a checkpoint slips more than 30 minutes, cut stretch (flex whisper, conversational debate overlay) rather than the DM join.
 
 ## Verification
 
-- **Terminal provider first.** Add the terminal provider alongside iMessage so the whole flow is drivable without phones; it is also the demo fallback if venue Wi-Fi dies.
-- **Router truth table:** a group message without a mention is ignored; a group message with a mention is handled; a DM is always handled; a reaction routes to `onTapback` and never to the text path.
-- **Join:** two phones DM the join code and both land on the same `planId`; a third phone with a different code does not.
-- **`getMembers()` on a DM throws** — assert the code path never calls it outside a group.
-- **Contract 4 guard:** assert the object B hands over has exactly three keys, so a later edit cannot leak a per-person field into A's side.
-- **End-to-end (9pm checkpoint):** three phones in one group chat, each with a secret constraint, producing one plan card that everyone tapbacks.
-- **Backup video recorded before midnight** — the doc treats this as a checkpoint, not a nice-to-have.
+- **Terminal provider** alongside iMessage so join codes work without phones; Wi-Fi fallback.
+- **Router:** group inbound ignored; DM always handled; reaction → `onTapback`, never slot text.
+- **Join:** two phones `JOIN` the same code → same `planId`; a third phone with a different code does not; Photon APIs never used to list members.
+- **`getMembers()` never called.**
+- **Contract 4:** merged object has exactly three keys.
+- **9pm:** three DMs, secret constraints, one plan card in each DM, tapbacks there. Human group only ever contains the join code (and optionally a pasted card).
+- Backup video before midnight.
 
 ## Open questions for A
 
-- `sms:` body pre-fill: `&body=` or `?body=` on the demo phones' iOS version?
-- Does the Spectrum line's own phone number come from config (`imessage.config({ clients: [{ phone }] })`) or need a `photon spectrum lines list` lookup? Mention-gating needs our own address to compare against.
-- Tapback confirm: all participants, or first tapback wins? The doc says "people confirm with a tapback" without a quorum — pick one and say it in the demo.
+- Tapback confirm: all participants, or first tapback wins? Pick one and say it in the demo.
+- Fan-out: reply only in sessions that already inbound vs `space.create` for quiet participants (Pro allowlist).
+- Conversational “agents advocate” overlay: stretch on the backroom **after** a working DM card; do not replace merge/filter/maximin.
