@@ -101,6 +101,7 @@ The discriminator is only ever *does this sender have an active plan*. Creator a
 | no plan, text starts `JOIN <code>` | resolve the code, join that plan |
 | no plan, anything else | create a plan, mint a code, reply with it |
 | has plan, text is `go` (and sender is the creator) | state transition |
+| has plan, status `negotiating`, a question is pending for this sender | `resumeNegotiation(...)` — **not** `handleDM` |
 | has plan, anything else | slot-fill |
 
 ## 3. Join flow
@@ -141,10 +142,13 @@ on inbound DM:
   plan = lookup(sender)
   switch (plan.status):
     collecting  -> slot-fill; if creator said "go" and everyone is ready -> negotiating
-    negotiating -> "working on it" (ignore input, do not re-run)
+    negotiating -> if a question is pending for this sender: resumeNegotiation(...)
+                   otherwise: "working on it", do not re-run
     proposed    -> tapback counts as confirm; text gets "the plan is X, tap to confirm"
     confirmed   -> "you are all set"
 ```
+
+**Do not blanket-ignore input while `negotiating`.** Once an agent can ask its human a question, the reply arrives as an ordinary inbound DM — and swallowing it deadlocks the plan forever with no error. This is a silent hang, not a crash, so it will not show up in testing until someone actually gets asked something. See `negotiation-protocol.md`.
 
 **Why bother instead of doing the steps in order?** Because messages arrive whenever humans feel like it, and without the status each of these is a live bug:
 
@@ -173,7 +177,7 @@ const card     = { venueId: chosen.venueId, time: pickTime(merged.window),
                    estCostUSD: venueById(chosen.venueId)!.estCostUSD };
 ```
 
-Write this as a **loop with `maxRounds = 1`**, not a straight-line pass. With 1 it behaves exactly like today's design; if agent-to-agent negotiation happens later the change is `maxRounds = 3`. Written straight-line it becomes a rewrite at 10pm.
+Put this whole block behind **one local function** — `runNegotiation(planId, people)` — rather than inlining it in the switch. When B ships `negotiate()` (contract 12, `negotiation-protocol.md`), swapping it in is a one-line change, and A never writes a round loop: B owns the rounds because the pause state is B's.
 
 **`merged.window` is not a venue filter.** B's venue records dropped `hours` because the demo is one evening, so every venue is open. `filterVenues` applies budget, dietary and travel; A reads `merged.window` only to assign the card's time. `hasOverlap(merged.window)` returning false means the group has no shared time at all.
 
@@ -263,6 +267,7 @@ Contracts 1, 3, 4 and 6 are implemented and covered by `npm run harness` (19 ass
 | 7 | `rounds` shape | **A writes it**, B's screen reads it — agree early, it is B's unblock | 5pm |
 | 8 | `users` / `plans` | A creates the plan, owns `joinCode`, `participants`, `status` | 5pm |
 | 9 | Nessie anchor | A writes `budgetCapUSD`, the same field the slot schema defines | 9pm |
+| 12 | `negotiate` / `resumeNegotiation` | **Proposed.** A calls, handles `settled` / `waiting` / `failed`. See `negotiation-protocol.md` | only if built |
 
 **Contract 8 is the one with a silent failure mode:** B seeds ~15 preferred spots per demo user into `users`. A's join flow must not overwrite `users` wholesale — write `plans` and touch only `activePlanId` on the user. With no group chat, `joinCode` is now the *only* participant source, so it is load-bearing rather than a convenience.
 
@@ -272,7 +277,7 @@ Contracts 1, 3, 4 and 6 are implemented and covered by `npm run harness` (19 ass
 
 ## Proposed: agent-to-agent negotiation — NOT BUILT
 
-**Status: proposed, no code exists.** `src/contracts.ts` on `main` is unchanged and every signature above is still accurate. Do not build against this section. It is here because one decision in A's state machine is much cheaper to make now than later — the `maxRounds = 1` loop in step 6.
+**Status: proposed, no code exists.** `src/contracts.ts` on `main` is unchanged and every signature above is still accurate. Do not build against this section. **The full spec is `docs/negotiation-protocol.md`** — move types, termination, contract 12 and the pause/resume semantics live there; this section is the summary. It is here because one decision in A's state machine is much cheaper to make now than later — the `maxRounds = 1` loop in step 6.
 
 ### What it is
 
