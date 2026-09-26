@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "@spectrum-ts/imessage";
 // Spectrum bridges a single agent loop to many messaging interfaces.
