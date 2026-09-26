@@ -1,0 +1,153 @@
+// The A/B contracts. A (messaging and flow) imports this file; tonight the
+// compiler is the only thing enforcing these shapes, so a field change here is a
+// contract change. Numbering matches the contracts table in the build plan.
+
+export type Confidence = "high" | "low";
+
+// Contract 1. Extraction captures verbatim words in `raw`; src/resolve/ turns
+// them into `value`. All three states are distinct: slot absent = never asked,
+// value [] or 0 = "no restriction", value null with a raw = asked but not
+// canonicalisable. Collapsing the last two makes the agent re-ask someone who
+// already said "I eat anything".
+export type Slot<T> = {
+  raw: string;
+  value: T | null;
+  confidence: Confidence;
+};
+
+export type Coords = { lat: number; lng: number };
+export type Home = Coords & { label: string };
+export type TimeWindow = { start: string; end: string };
+
+export const DIETARY_TAGS = [
+  "vegetarian",
+  "vegan",
+  "halal",
+  "kosher",
+  "gluten-free",
+  "dairy-free",
+  "nut-free",
+  "pescatarian",
+  "no-pork",
+  "no-shellfish",
+] as const;
+export type DietaryTag = (typeof DIETARY_TAGS)[number];
+
+export type Slots = {
+  budgetCapUSD?: Slot<number>;
+  dietary?: Slot<DietaryTag[]>;
+  window?: Slot<TimeWindow>;
+  home?: Slot<Home>;
+  maxTravelMin?: Slot<number>;
+  tags?: string[];
+  namedSpots?: string[];
+  // Phrases no resolver could canonicalise. Scored softly, never filtered on --
+  // this is what stops "I only eat purple food" emptying the survivor set.
+  unresolved?: string[];
+};
+
+export const REQUIRED_SLOTS = [
+  "budgetCapUSD",
+  "dietary",
+  "window",
+  "home",
+  "maxTravelMin",
+] as const;
+export type RequiredSlot = (typeof REQUIRED_SLOTS)[number];
+
+// Contract 2 (A -> B -> A). B owns DM copy because it knows what is still
+// missing; A owns group copy.
+export type HandleDMInput = { planId: string; userId: string; text: string };
+export type HandleDMResult = { slots: Slots; missing: RequiredSlot[]; reply: string };
+
+// Contract 3 (B owns, A calls). No `hours` field: demo scope is one evening, so
+// every venue is open. Consequence -- merged.window does not filter venues, it
+// only tells A what time to propose.
+export type Venue = {
+  id: string;
+  name: string;
+  estCostUSD: number;
+  tags: string[];
+  neighborhood: string;
+  lat: number;
+  lng: number;
+};
+
+// One aggregate per survivor, so whose commute it is stays unlabelled.
+export type Survivor = { venueId: string; longestTravelMin: number };
+
+// A category, never a person and never a reason -- safe for the backroom screen.
+export type FailedOn = "budget" | "dietary" | "travel";
+export type Rejection = { venueId: string; failedOn: FailedOn };
+
+export type FilterResult = { survivors: Survivor[]; rejected: Rejection[] };
+
+// Stays inside B. Passed to filterVenues separately so it never reaches A.
+export type TravelProfile = { userId: string; home: Home | null; maxTravelMin: number | null };
+
+// Contract 4 (B -> A). Three group-level fields, nothing per-person. Travel is
+// absent by design: a commute needs home coordinates, the private data this
+// contract exists to withhold. harness.ts fails if a fourth key appears.
+export type MergedConstraints = {
+  budgetCapUSD: number;
+  requiredDietary: DietaryTag[];
+  window: TimeWindow;
+};
+
+export const MERGED_KEYS = ["budgetCapUSD", "requiredDietary", "window"] as const;
+
+// Contract 5 (A -> B). Batched: one payload per person per round.
+export type Candidate = { venueId: string; time: string; estCostUSD: number };
+export type CandidatePlan = { roundId: string; candidates: Candidate[] };
+
+// Contract 6 (B -> A). No reason field (the privacy rule at the individual
+// level) and no travel field (A gets the unlabelled aggregate from the filter).
+// Scores must be graded: best-worst-case selection over 1.0/0.0 ties at zero and
+// makes A's picker arbitrary.
+export type Evaluation = {
+  venueId: string;
+  pass: boolean;
+  score: number;
+  needsMyHuman?: true;
+};
+
+// Contract 7 (A writes, B reads). B's decoupling seam -- the backroom screen can
+// be built against hand-written rounds with no orchestrator and no Spectrum.
+export type RoundLog = {
+  planId: string;
+  round: number;
+  at: string;
+  candidates: { venueId: string; passed: boolean; failedOn?: FailedOn; scores: number[] }[];
+};
+
+export type PlanStatus = "collecting" | "negotiating" | "proposed" | "confirmed";
+
+// Contract 8. Ownership is split down this type, and A's join flow must not
+// clobber users.profile -- that is where the ~15 seeded preferred spots live.
+export type PlanDoc = {
+  _id: string;
+  joinCode: string; // A
+  participants: string[]; // A
+  status: PlanStatus; // A
+  slots: Record<string, Slots>; // B
+  merged?: MergedConstraints; // B
+  chosen?: Candidate; // A
+};
+
+export type UserDoc = {
+  _id: string;
+  phone: string;
+  profile: {
+    home?: Home;
+    dietary?: DietaryTag[];
+    defaultBudgetUSD?: number;
+    tastes: string[];
+    preferredSpots: string[];
+  };
+  activePlanId?: string;
+  wishlist: string[];
+};
+
+// Contract 9 (A -> B). Writes budgetCapUSD, the field contract 1 defines. A
+// second budget field is the failure mode to avoid.
+export type NessieAnchor = { userId: string; budgetCapUSD: number; typicalSpendUSD: number };

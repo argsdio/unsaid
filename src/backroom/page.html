@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Unsaid — backroom</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14181d; --line: #242b33;
+    --text: #e8edf2; --dim: #8b97a3; --pass: #4ade80; --fail: #64748b; --accent: #f0b429;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+    padding: 28px 32px;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 24px; }
+  h1 { font-size: 26px; margin: 0; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); font-size: 15px; }
+  .grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--dim); margin: 0 0 16px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .row:last-child { border-bottom: 0; }
+  .name { flex: 1; font-size: 19px; }
+  .row.out .name { text-decoration: line-through; color: var(--fail); }
+  .hood { color: var(--dim); font-size: 14px; }
+  .why { font-size: 13px; color: var(--fail); font-style: italic; white-space: nowrap; }
+  .cost { color: var(--dim); font-size: 15px; min-width: 44px; text-align: right; }
+  .bars { display: flex; gap: 5px; align-items: flex-end; height: 26px; }
+  .bar { width: 11px; background: var(--pass); border-radius: 2px 2px 0 0; opacity: 0.85; }
+  .worst { font-variant-numeric: tabular-nums; color: var(--pass); min-width: 52px; text-align: right; font-size: 16px; }
+  .winner { color: var(--accent); }
+  .winner .name { font-weight: 600; }
+  button {
+    background: transparent; color: var(--accent); border: 1px solid var(--accent);
+    border-radius: 8px; padding: 9px 16px; font: inherit; cursor: pointer;
+  }
+  .reveal { display: grid; gap: 14px; }
+  .said { font-size: 15px; }
+  .who { color: var(--dim); font-size: 13px; text-transform: uppercase; letter-spacing: 0.07em; }
+  .quote { color: var(--text); }
+  .saw { border-top: 1px solid var(--line); padding-top: 14px; }
+  code { font: 14px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent); }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Unsaid — backroom</h1>
+  <span class="sub" id="status">connecting…</span>
+</header>
+
+<div class="grid">
+  <section class="panel">
+    <h2>Negotiation</h2>
+    <div id="candidates"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Privacy reveal</h2>
+    <button id="toggle">Show what each person said</button>
+    <div id="reveal" class="reveal hidden"></div>
+  </section>
+</div>
+
+<script>
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+  // Group-level categories only. Never a person, never a reason.
+  const WHY = {
+    budget: "over the group budget",
+    dietary: "missing a required tag",
+    travel: "too far for someone",
+  };
+
+  let revealed = false;
+  document.getElementById("toggle").addEventListener("click", () => {
+    revealed = !revealed;
+    document.getElementById("reveal").classList.toggle("hidden", !revealed);
+    document.getElementById("toggle").textContent = revealed
+      ? "Hide"
+      : "Show what each person said";
+  });
+
+  function renderCandidates(rounds) {
+    const round = rounds[rounds.length - 1];
+    if (!round) return "<div class='sub'>waiting for the first round…</div>";
+
+    const passed = round.candidates.filter((c) => c.passed);
+    const worstOf = (c) => (c.scores.length ? Math.min(...c.scores) : -1);
+    let best = null;
+    for (const c of passed) if (!best || worstOf(c) > worstOf(best)) best = c;
+
+    return round.candidates
+      .map((c) => {
+        const worst = worstOf(c);
+        const bars = c.scores
+          .map((s) => `<div class="bar" style="height:${Math.max(3, s * 26)}px"></div>`)
+          .join("");
+        return `<div class="row ${c.passed ? "" : "out"} ${best && c.venueId === best.venueId ? "winner" : ""}">
+          <span class="name">${esc(c.name)}</span>
+          <span class="hood">${esc(c.neighborhood)}</span>
+          <span class="cost">${c.estCostUSD === null ? "" : "$" + c.estCostUSD}</span>
+          ${c.passed
+            ? `<div class="bars">${bars}</div><span class="worst">${worst < 0 ? "" : worst.toFixed(2)}</span>`
+            : `<span class="why">reason private — ${WHY[c.failedOn] || "filtered"}</span>`}
+        </div>`;
+      })
+      .join("");
+  }
+
+  function renderReveal(said, merged) {
+    const people = Object.entries(said)
+      .map(
+        ([who, lines]) => `<div class="said">
+          <div class="who">${esc(who)} said privately</div>
+          <div class="quote">${lines.map((l) => "“" + esc(l) + "”").join(" · ")}</div>
+        </div>`,
+      )
+      .join("");
+
+    const saw = merged
+      ? `<code>budget ≤ $${merged.budgetCapUSD}<br />must have: ${
+          merged.requiredDietary.length ? merged.requiredDietary.join(", ") : "nothing"
+        }<br />window: ${merged.window.start.slice(11, 16)}–${merged.window.end.slice(11, 16)}</code>`
+      : "<code>not computed yet</code>";
+
+    return `${people}<div class="saw"><div class="who">All the orchestrator ever saw</div>${saw}</div>`;
+  }
+
+  async function tick() {
+    try {
+      const res = await fetch("/api/state" + location.search);
+      const state = await res.json();
+      document.getElementById("candidates").innerHTML = renderCandidates(state.rounds);
+      document.getElementById("reveal").innerHTML = renderReveal(state.said, state.merged);
+      document.getElementById("status").textContent =
+        `round ${state.rounds.length || 0} · live`;
+    } catch (err) {
+      document.getElementById("status").textContent = "disconnected";
+    }
+  }
+
+  tick();
+  setInterval(tick, 1500);
+</script>
+</body>
+</html>

@@ -5,10 +5,14 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts"
+    "dev": "tsx watch src/index.ts",
+    "harness": "tsx src/harness.ts",
+    "backroom": "tsx src/backroom/server.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.4",
+    "mongodb": "^7.6.0",
+    "openai": "^7.23.0",
     "spectrum-ts": "^12.10.1"
   },
   "devDependencies": {
