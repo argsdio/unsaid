@@ -342,7 +342,11 @@ async function main(): Promise<void> {
   const ask1 = await ask("dinner friday?");
   const ask2 = await ask("qqqq zzzz");
   const ask3 = await ask("qqqq zzzz");
-  check("the second ask is rephrased, not repeated", ask1 !== ask2 && ask2.includes("didn't catch"));
+  // Property, not copy: three consecutive failures must never repeat a string.
+  check(
+    "no two consecutive asks are identical",
+    ask1 !== ask2 && ask2 !== ask3 && ask1 !== ask3,
+  );
   check("the third ask stops asking and assumes a default", ask3.includes("Manhattan"));
   const laddered = await ladderStore.getSlots("lp", "ladder");
   check("the assumed value is marked low confidence", laddered.home?.confidence === "low");

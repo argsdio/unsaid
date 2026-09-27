@@ -41,14 +41,20 @@ const QUESTIONS: Record<RequiredSlot, string> = {
   budgetCapUSD: "Last thing — roughly what are you thinking budget-wise? \"cheap\" works too.",
 };
 
-// Asked once, then rephrased with concrete examples. Never the same string twice:
-// a question that repeats verbatim is the worst failure a chat interface has.
+// The retry asks for something EASIER, not the same thing with more formats.
+// Listing formats invites two failures: an example that resembles what the person
+// just typed reads as "you wrote it wrong", and promising cross-streets or
+// addresses depends on the geocoder being reachable. A neighborhood always works,
+// because the gazetteer handles it with no network at all.
+//
+// Capitalisation and punctuation never matter anywhere -- normalise() lowercases
+// and strips before any resolver sees the text.
 const RETRY: Record<RequiredSlot, string> = {
-  home: "Sorry, I didn't catch that. A neighborhood, cross-street or address all work — \"Bushwick\", \"60th and Lex\", \"133 W 3rd St\".",
-  window: "Let me try again — what time? Something like \"7pm\", \"after 8\", or \"6 to 10\".",
-  maxTravelMin: "In minutes is easiest — \"30 min\", \"an hour\", or \"not far\".",
-  dietary: "Anything you avoid? \"vegetarian\", \"no nuts\", or \"I eat everything\" all work.",
-  budgetCapUSD: "A rough number per person — \"$30\", \"20 to 40\", or just \"cheap\".",
+  home: "Hmm, I couldn't place that. What neighborhood is it in? Bushwick, Harlem, the East Village — that kind of thing.",
+  window: "Sorry, what time roughly? Just an hour is fine — 7, or 8.",
+  maxTravelMin: "Roughly how many minutes are you willing to travel? A number is fine.",
+  dietary: "Anything you can't eat? If there's nothing, just say none.",
+  budgetCapUSD: "Roughly how many dollars per person? A number is fine.",
 };
 
 // After this many asks, assume something and move on. A slot we cannot read must
