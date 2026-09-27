@@ -563,8 +563,9 @@ async function main(): Promise<void> {
       ),
   );
   check(
-    "a venue with no placeId still gets a usable map link",
-    mapsLink({ ...someVenue, placeId: undefined }).includes("maps/search"),
+    "the map link is a pin, not a raw place_id query",
+    mapsLink(someVenue).includes(`/@${someVenue.lat},${someVenue.lng}`) &&
+      !mapsLink(someVenue).includes("place_id"),
   );
 
   check(

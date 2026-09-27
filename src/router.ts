@@ -63,7 +63,7 @@ function dmPeer(space: Space): string | null {
   return null;
 }
 
-function voterId(message: Message, space: Space): string {
+function personId(message: Message, space: Space): string {
   const sender = senderId(message, space);
   const peer = dmPeer(space);
   if (peer && sender !== peer) return peer;
@@ -92,8 +92,9 @@ async function sendHandleDM(
   reason: string,
   prefix = "",
   occasion?: Occasion,
+  cohort: string[] = [userId],
 ): Promise<void> {
-  const body = await overlayNessieQuestion(userId, result, occasion);
+  const body = await overlayNessieQuestion(userId, result, occasion, cohort);
   await send(space, prefix ? `${prefix}${body}` : body, reason);
 }
 
@@ -235,7 +236,7 @@ export async function onDirectText(
   const text = message.content.text.trim();
   if (!text) return;
 
-  const userId = senderId(message, space);
+  const userId = personId(message, space);
   const tracked = asTrackedSpace(space);
   const joinCode = parseJoin(text);
   const current = await activePlan(store, userId);
@@ -258,6 +259,7 @@ export async function onDirectText(
       "join: attached + handleDM",
       `You're in (${joined.plan.joinCode}). ${planIntro(joined.plan)}\n\n`,
       joined.plan.occasion,
+      joined.plan.participants,
     );
     botLog("join", { userId, planId: joined.plan._id, joinCode: joined.plan.joinCode });
     return;
@@ -334,6 +336,7 @@ export async function onDirectText(
       "create: new plan + handleDM",
       `${shareText(plan.joinCode, whenLabel(occasion, planDate))}\n\n`,
       occasion,
+      plan.participants,
     );
     botLog("create", { userId, planId: plan._id, joinCode: plan.joinCode });
     return;
@@ -466,6 +469,7 @@ export async function onDirectText(
     `handleDM next question (missing: ${dm.missing.join(", ") || "none"})`,
     "",
     current.occasion,
+    current.participants,
   );
 }
 
@@ -677,7 +681,7 @@ export async function routeMessage(
 
   const emoji = reactionEmoji(message);
   if (emoji !== null) {
-    const userId = senderId(message, space);
+    const userId = personId(message, space);
     botLog("inbound reaction", { userId, emoji });
     if (!isConfirmEmoji(emoji)) {
       botLog("tapback ignored: not a confirm emoji", { userId, emoji });
@@ -690,7 +694,7 @@ export async function routeMessage(
   // A tap on a native poll. Spectrum delivers it as its own content kind rather
   // than as text, so without this the vote is silently dropped.
   if (message.content.type === "poll_option") {
-    const userId = voterId(message, space);
+    const userId = personId(message, space);
     const choice = message.content as { selected?: boolean };
     const { label, index } = pollChoiceLabel(message.content);
     botLog("inbound poll vote", { userId, title: label, index, selected: choice.selected });

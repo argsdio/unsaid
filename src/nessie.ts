@@ -1,7 +1,8 @@
 import type { HandleDMResult, Occasion, RequiredSlot } from "./contracts.ts";
 import { botLog } from "./log.ts";
 
-const NESSIE_BASE = "http://api.nessieisreal.com";
+// HTTPS only — port 80 on this host refuses connections.
+const NESSIE_BASE = "https://api.nessieisreal.com";
 
 type DinnerCharge = { merchant: string; amount: number };
 
@@ -69,7 +70,7 @@ function looksLikeDinner(purchase: { amount?: unknown; description?: unknown; me
 }
 
 async function getJson(url: string): Promise<unknown> {
-  const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+  const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
   if (!res.ok) throw new Error(`nessie ${res.status}`);
   return res.json();
 }
@@ -88,13 +89,19 @@ function chargeFromPurchase(purchase: {
   return { merchant, amount };
 }
 
-async function chargesFromApi(userId: string): Promise<DinnerCharge[] | null> {
+function slotFor(userId: string, cohort: string[]): number {
+  const i = cohort.indexOf(userId);
+  return i >= 0 ? i : hashUser(userId);
+}
+
+async function chargesFromApi(userId: string, cohort: string[]): Promise<DinnerCharge[] | null> {
   const key = process.env.NESSIE_API_KEY?.trim();
   if (!key) return null;
 
   const customers = await getJson(`${NESSIE_BASE}/customers?key=${encodeURIComponent(key)}`);
-  if (!Array.isArray(customers) || customers.length === 0) return null;
-  const customer = customers[hashUser(userId) % customers.length] as { _id?: string };
+  // One sandbox customer means every phone sees the same purchases.
+  if (!Array.isArray(customers) || customers.length < 2) return null;
+  const customer = customers[slotFor(userId, cohort) % customers.length] as { _id?: string };
   if (!customer?._id) return null;
 
   const accounts = await getJson(
@@ -123,19 +130,24 @@ export type NessiePull = {
   source: "api" | "sandbox";
 };
 
-export async function pullDinnerSpend(userId: string): Promise<NessiePull> {
+export async function pullDinnerSpend(
+  userId: string,
+  cohort: string[] = [userId],
+): Promise<NessiePull> {
   try {
-    const live = await chargesFromApi(userId);
+    const live = await chargesFromApi(userId, cohort);
     const typical = live ? medianDollars(live.map((c) => c.amount)) : null;
     if (live && typical) {
       botLog("nessie median from API purchases", { userId, typical, charges: live });
       return { typical, charges: live, source: "api" };
     }
   } catch (err) {
-    botLog("nessie API skipped, using seeded purchases", { userId, err: String(err) });
+    const cause = err instanceof Error && "cause" in err ? String((err as { cause?: unknown }).cause) : undefined;
+    botLog("nessie API skipped, using seeded purchases", { userId, err: String(err), cause });
   }
 
-  const charges = POOL[hashUser(userId) % POOL.length] ?? POOL[0]!;
+  // Slot by seat on the plan so two phones never share a ledger on stage.
+  const charges = POOL[slotFor(userId, cohort) % POOL.length] ?? POOL[0]!;
   const typical = medianDollars(charges.map((c) => c.amount)) ?? 30;
   botLog("nessie median from seeded purchases", { userId, typical, charges });
   return { typical, charges, source: "sandbox" };
@@ -174,9 +186,10 @@ export async function overlayNessieQuestion(
   userId: string,
   result: HandleDMResult,
   occasion: Occasion = "dinner",
+  cohort: string[] = [userId],
 ): Promise<string> {
   if (result.missing[0] !== "budgetCapUSD") return result.reply;
-  const pull = await pullDinnerSpend(userId);
+  const pull = await pullDinnerSpend(userId, cohort);
   offered.set(userId, pull.typical);
   const q = budgetQuestion(pull, occasion);
   for (const ask of B_BUDGET_ASKS) {

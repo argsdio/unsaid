@@ -185,12 +185,12 @@ export function filterVenues(
 // catalogue containing venues called Post, Bite, Folk and Ops does not match
 // them inside an ordinary sentence. The longest match wins, so "max soha" beats
 // a venue merely called Max.
-// A placeId is the unambiguous handle; a name search is the fallback for the
-// hand-written entries Places never matched.
+// Name + pin, not `q=place_id:…`. That query string is what iMessage unfurls
+// as a raw ChIJ… token, and the Maps app treats it as a search for that token
+// instead of opening the place.
 export function mapsLink(venue: Venue): string {
-  if (venue.placeId) return `https://www.google.com/maps/place/?q=place_id:${venue.placeId}`;
-  const q = encodeURIComponent(`${venue.name} ${venue.neighborhood} New York`);
-  return `https://www.google.com/maps/search/?api=1&query=${q}`;
+  const slug = encodeURIComponent(venue.name).replace(/%20/g, "+");
+  return `https://www.google.com/maps/place/${slug}/@${venue.lat},${venue.lng},17z`;
 }
 
 // Transit, because this is New York and nobody is driving to dinner. `from` is
