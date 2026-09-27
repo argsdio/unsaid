@@ -6,7 +6,7 @@ import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "
 import { type RawSlots, resolveBudget, resolveDietary, resolveHome, resolveSlots } from "./resolve/index.ts";
 import { scoreCandidates } from "./agent/score.ts";
 import { handleDM } from "./slots.ts";
-import { extractOffline } from "./agent/extract.ts";
+import { extract, extractOffline } from "./agent/extract.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
@@ -399,6 +399,23 @@ async function main(): Promise<void> {
       upserted?.slots[U("m")]?.tags?.[0] === "y",
   );
   usedPlans.push(implicit);
+
+  // The only assertion that isolates the Grok path: offline assigns the WHOLE
+  // message to each matching slot, so a shorter value proves the model returned
+  // a real span. Without this, an empty Grok response merges away to offline and
+  // every other check still passes.
+  if (process.env.XAI_API_KEY) {
+    const sentence = "im in bushwick and $25 tops, nothing with nuts";
+    const spans = await extract(sentence, {});
+    check(
+      "Grok returned spans, not the whole message",
+      typeof spans.budgetRaw === "string" && spans.budgetRaw.length < sentence.length,
+      `(budgetRaw = ${JSON.stringify(spans.budgetRaw)})`,
+    );
+    check("Grok found the location offline missed as a span", typeof spans.homeRaw === "string");
+  } else {
+    console.log("  SKIP  Grok span check (XAI_API_KEY not set)");
+  }
 
   const onMongo = Boolean(process.env.MONGODB_URI);
   check(
