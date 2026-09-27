@@ -1,22 +1,22 @@
 import "dotenv/config";
 import { Spectrum } from "spectrum-ts";
 import { imessage } from "@spectrum-ts/imessage";
-// Spectrum bridges a single agent loop to many messaging interfaces.
-// Each provider in `providers` adds an interface (terminal TUI, iMessage, …).
-// Docs: https://photon.codes/docs/spectrum-ts
+import { openStore } from "./db.ts";
+import { routeMessage } from "./router.ts";
+
+const store = await openStore();
+console.log(
+  process.env.MONGODB_URI ? "store: mongodb" : "store: memory (set MONGODB_URI to persist joins)",
+);
+
 const app = await Spectrum({
   projectId: process.env.PROJECT_ID!,
   projectSecret: process.env.PROJECT_SECRET!,
-  providers: [
-    // imessage
-    imessage.config(),
-  ],
+  providers: [imessage.config()],
 });
 
-// `app.messages` is an async iterable. Each tick yields a `space` (the
-// conversation) and an inbound `message`. Reply by awaiting `space.send(...)`.
+const im = imessage(app);
+
 for await (const [space, message] of app.messages) {
-  if (message.content.type === "text") {
-    await space.send(`echo: ${message.content.text}`);
-  }
+  await routeMessage(space, message, store, im.space);
 }

@@ -28,6 +28,7 @@ export type Store = {
   // A calls this on join. Never upsertUser, which replaces the whole document
   // and would wipe the profile and onboarding state that B builds.
   setActivePlan(userId: string, planId: string): Promise<void>;
+  clearActivePlan(userId: string): Promise<void>;
   upsertUser(user: UserDoc): Promise<void>;
 
   appendRound(round: RoundLog): Promise<void>;
@@ -119,6 +120,11 @@ function memoryStore(): Store {
       users.set(userId, existing
         ? { ...existing, activePlanId: planId }
         : { _id: userId, phone: userId, profile: { tastes: [], preferredSpots: [] }, wishlist: [], activePlanId: planId });
+    },
+    async clearActivePlan(userId) {
+      const existing = users.get(userId);
+      if (!existing) return;
+      users.set(userId, { ...existing, activePlanId: undefined });
     },
     async upsertUser(user) {
       users.set(user._id, user);
@@ -239,6 +245,9 @@ async function mongoStore(uri: string): Promise<Store> {
         },
         { upsert: true },
       );
+    },
+    async clearActivePlan(userId) {
+      await users.updateOne({ _id: userId }, { $unset: { activePlanId: "" } });
     },
     async upsertUser(user) {
       const { _id, ...rest } = user;
