@@ -12,6 +12,10 @@ export type Store = {
   getPlanByJoinCode(code: string): Promise<PlanDoc | null>;
   addParticipant(planId: string, userId: string): Promise<void>;
   setStatus(planId: string, status: PlanStatus): Promise<void>;
+  // Full teardown: the plan, its rounds and its messages. Used to reset between
+  // demo runs, and so tests can clean up after themselves against a real cluster.
+  deletePlan(planId: string): Promise<void>;
+  deleteUser(userId: string): Promise<void>;
 
   getSlots(planId: string, userId: string): Promise<Slots>;
   getAllSlots(planId: string): Promise<Record<string, Slots>>;
@@ -79,6 +83,18 @@ function memoryStore(): Store {
     async setStatus(planId, status) {
       ensure(planId).status = status;
     },
+    async deletePlan(planId) {
+      plans.delete(planId);
+      for (let i = rounds.length - 1; i >= 0; i--) {
+        if (rounds[i]?.planId === planId) rounds.splice(i, 1);
+      }
+      for (const key of [...messages.keys()]) {
+        if (key.startsWith(`${planId}:`)) messages.delete(key);
+      }
+    },
+    async deleteUser(userId) {
+      users.delete(userId);
+    },
     async getSlots(planId, userId) {
       return plans.get(planId)?.slots[userId] ?? {};
     },
@@ -117,6 +133,16 @@ function memoryStore(): Store {
   };
 }
 
+// Fields to seed when an update upserts a plan into existence. Whatever the
+// update itself touches must be omitted, or Mongo rejects the write with a path
+// conflict -- and omitting the rest would leave a PlanDoc missing required fields.
+function seedExcept(planId: string, omit: string[]): Record<string, unknown> {
+  const blank: Record<string, unknown> = { ...blankPlan(planId) };
+  delete blank._id;
+  for (const key of omit) delete blank[key];
+  return blank;
+}
+
 async function mongoStore(uri: string): Promise<Store> {
   const client = new MongoClient(uri);
   await client.connect();
@@ -151,12 +177,29 @@ async function mongoStore(uri: string): Promise<Store> {
     async addParticipant(planId, userId) {
       await plans.updateOne(
         { _id: planId },
-        { $addToSet: { participants: userId }, $setOnInsert: blankPlan(planId) },
+        {
+          $addToSet: { participants: userId },
+          $setOnInsert: seedExcept(planId, ["participants"]),
+        },
         { upsert: true },
       );
     },
     async setStatus(planId, status) {
-      await plans.updateOne({ _id: planId }, { $set: { status } }, { upsert: true });
+      await plans.updateOne(
+        { _id: planId },
+        { $set: { status }, $setOnInsert: seedExcept(planId, ["status"]) },
+        { upsert: true },
+      );
+    },
+    async deletePlan(planId) {
+      await Promise.all([
+        plans.deleteOne({ _id: planId }),
+        rounds.deleteMany({ planId }),
+        messages.deleteMany({ planId }),
+      ]);
+    },
+    async deleteUser(userId) {
+      await users.deleteOne({ _id: userId });
     },
     async getSlots(planId, userId) {
       const plan = await plans.findOne({ _id: planId });
@@ -170,7 +213,10 @@ async function mongoStore(uri: string): Promise<Store> {
     async setSlots(planId, userId, value) {
       await plans.updateOne(
         { _id: planId },
-        { $set: { [`slots.${userId}`]: value } },
+        {
+          $set: { [`slots.${userId}`]: value },
+          $setOnInsert: seedExcept(planId, ["slots"]),
+        },
         { upsert: true },
       );
     },

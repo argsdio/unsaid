@@ -224,10 +224,19 @@ async function main(): Promise<void> {
   check("'cheap' resolves to a number", typeof resolveBudget("cheap").value === "number");
   check("'$25 tops' resolves to 25", resolveBudget("$25 tops, kinda broke rn").value === 25);
 
+  // Everything below runs against the REAL store — Atlas when MONGODB_URI is
+  // set — so the Mongo implementation is actually exercised. Ids are scoped to
+  // this run so repeated runs never collide, and torn down at the end.
+  const RUN = Date.now().toString(36);
+  const P = (name: string) => `p-${RUN}-${name}`;
+  const U = (name: string) => `u-${RUN}-${name}`;
+  const live = await openStore();
+  const usedPlans: string[] = [];
+  const usedUsers: string[] = [];
+
   // handleDM drives onboarding first, then plan slot-filling.
-  const dmStore = await openStore({ memory: true });
   const say = async (userId: string, planId: string, text: string) =>
-    handleDM({ planId, userId, text }, dmStore);
+    handleDM({ planId, userId, text }, live);
 
   console.log("\nONBOARDING A NEW USER");
   const onboarding = [
@@ -237,25 +246,25 @@ async function main(): Promise<void> {
     "class on tuesday nights",
     "joe's pizza",
   ];
-  let turn = await say("new-maya", "plan-a", onboarding[0]!);
+  let turn = await say(U("maya"), P("a"), onboarding[0]!);
   console.log(`  "${onboarding[0]}"`.padEnd(30) + `-> ${turn.reply}`);
   check("onboarding starts with location, not budget", /where do you usually/i.test(turn.reply));
   for (const text of onboarding.slice(1)) {
-    turn = await say("new-maya", "plan-a", text);
+    turn = await say(U("maya"), P("a"), text);
     console.log(`  "${text}"`.padEnd(30) + `-> ${turn.reply}`);
   }
 
-  const profile = (await dmStore.getUser("new-maya"))?.profile;
+  const profile = (await live.getUser(U("maya")))?.profile;
   check("profile learned home", profile?.home?.label.toLowerCase().includes("bushwick") === true);
   check("profile learned dietary", profile?.dietary?.includes("vegetarian") === true);
   check("profile learned a Tuesday blackout", profile?.blackouts?.[0]?.days.includes(2) === true);
   check("a named favourite became a venue id", profile?.preferredSpots.includes("joes-pizza") === true);
-  check("onboarding completed", (await dmStore.getUser("new-maya"))?.onboardedAt !== undefined);
+  check("onboarding completed", (await live.getUser(U("maya")))?.onboardedAt !== undefined);
   check("after onboarding it asks about time, not location", /what time works/i.test(turn.reply));
   check("and it says what it reused", /from your profile/i.test(turn.reply));
 
   console.log("\nSAME USER, SECOND PLAN (profile already known)");
-  let second = await say("new-maya", "plan-b", "dinner sunday?");
+  let second = await say(U("maya"), P("b"), "dinner sunday?");
   console.log(`  "dinner sunday?"`.padEnd(30) + `-> ${second.reply}`);
   check(
     "a returning user is not asked for location or diet again",
@@ -264,14 +273,14 @@ async function main(): Promise<void> {
   check("but budget is still asked every plan", second.missing.includes("budgetCapUSD"));
 
   for (const text of ["after 7", "i dont mind traveling", "$25 tops"]) {
-    second = await say("new-maya", "plan-b", text);
+    second = await say(U("maya"), P("b"), text);
     console.log(`  "${text}"`.padEnd(30) + `-> ${second.reply}`);
   }
   check("second plan completes in three answers", second.missing.length === 0);
   check("budget resolved to 25", second.slots.budgetCapUSD?.value === 25);
-  check("budget stayed out of the profile", !("defaultBudgetUSD" in ((await dmStore.getUser("new-maya"))?.profile ?? {})));
+  check("budget stayed out of the profile", !("defaultBudgetUSD" in ((await live.getUser(U("maya")))?.profile ?? {})));
 
-  const transcript = await dmStore.listMessages("plan-b", "new-maya");
+  const transcript = await live.listMessages(P("b"), U("maya"));
   check("messages are stored both directions", transcript.some((m) => m.direction === "in") && transcript.some((m) => m.direction === "out"));
   check("transcript length matches the exchange", transcript.length === 8, `(${transcript.length})`);
 
@@ -289,73 +298,74 @@ async function main(): Promise<void> {
 
   const tuesday = resolveBlackouts("class on tuesday nights and work until 7 on weekdays");
   check("two blackouts parsed from one sentence", tuesday.length === 2, `(${tuesday.length})`);
-  await dmStore.close();
+  usedPlans.push(P("a"), P("b"));
+  usedUsers.push(U("maya"));
 
   // setActivePlan must not disturb what onboarding built.
-  const joinStore = await openStore({ memory: true });
+  const joinStore = live;
   await joinStore.upsertUser({
-    _id: "join-u",
+    _id: U("join"),
     phone: "+1555",
     profile: { home: { lat: 1, lng: 2, label: "Bushwick" }, tastes: ["pizza"], preferredSpots: [] },
     onboardedAt: "2026-09-26T00:00:00Z",
     wishlist: [],
   });
-  await joinStore.setActivePlan("join-u", "plan-z");
-  const joined = await joinStore.getUser("join-u");
-  check("setActivePlan records the plan", joined?.activePlanId === "plan-z");
+  await joinStore.setActivePlan(U("join"), P("z"));
+  const joined = await joinStore.getUser(U("join"));
+  check("setActivePlan records the plan", joined?.activePlanId === P("z"));
   check("and leaves the profile intact", joined?.profile.home?.label === "Bushwick");
   check("and leaves onboarding state intact", joined?.onboardedAt !== undefined);
-  await joinStore.setActivePlan("brand-new", "plan-z");
-  check("setActivePlan creates a user that does not exist yet", (await joinStore.getUser("brand-new"))?.activePlanId === "plan-z");
-  await joinStore.close();
+  await joinStore.setActivePlan(U("fresh"), P("z"));
+  check("setActivePlan creates a user that does not exist yet", (await joinStore.getUser(U("fresh")))?.activePlanId === P("z"));
+  usedUsers.push(U("join"), U("fresh"));
 
   // Plan CRUD. A's join flow depends on every one of these.
-  const planStore = await openStore({ memory: true });
+  const planStore = live;
   const plan: PlanDoc = {
-    _id: "plan-1",
-    joinCode: "K7M2",
-    participants: ["maya"],
+    _id: P("1"),
+    joinCode: `C${RUN.slice(-3)}`,
+    participants: [U("m")],
     status: "collecting",
     slots: {},
   };
   check("createPlan succeeds on a free code", (await planStore.createPlan(plan)) === true);
-  check("getPlanByJoinCode finds it", (await planStore.getPlanByJoinCode("K7M2"))?._id === "plan-1");
+  check("getPlanByJoinCode finds it", (await planStore.getPlanByJoinCode(`C${RUN.slice(-3)}`))?._id === P("1"));
   check("an unknown code returns null", (await planStore.getPlanByJoinCode("ZZZZ")) === null);
   check("a blank code never matches", (await planStore.getPlanByJoinCode("")) === null);
   check(
     "a taken code is refused",
-    (await planStore.createPlan({ ...plan, _id: "plan-2" })) === false,
+    (await planStore.createPlan({ ...plan, _id: P("2") })) === false,
   );
 
-  await planStore.addParticipant("plan-1", "dev");
-  await planStore.addParticipant("plan-1", "dev");
+  await planStore.addParticipant(P("1"), U("dev"));
+  await planStore.addParticipant(P("1"), U("dev"));
   check(
     "addParticipant is idempotent",
-    (await planStore.getPlan("plan-1"))?.participants.join(",") === "maya,dev",
+    (await planStore.getPlan(P("1")))?.participants.join(",") === `${U("m")},${U("dev")}`,
   );
 
-  await planStore.setSlots("plan-1", "maya", { tags: ["pizza"] });
+  await planStore.setSlots(P("1"), U("m"), { tags: ["pizza"] });
   check(
     "slots round-trip through the plan document",
-    (await planStore.getSlots("plan-1", "maya")).tags?.[0] === "pizza",
+    (await planStore.getSlots(P("1"), U("m"))).tags?.[0] === "pizza",
   );
 
-  await planStore.setStatus("plan-1", "confirmed");
+  await planStore.setStatus(P("1"), "confirmed");
   check(
     "a confirmed plan stops answering to its code",
-    (await planStore.getPlanByJoinCode("K7M2")) === null,
+    (await planStore.getPlanByJoinCode(`C${RUN.slice(-3)}`)) === null,
   );
   check(
     "so the code can be reused by a new plan",
-    (await planStore.createPlan({ ...plan, _id: "plan-3" })) === true,
+    (await planStore.createPlan({ ...plan, _id: P("3") })) === true,
   );
-  await planStore.close();
+  usedPlans.push(P("1"), P("2"), P("3"));
 
   // The backroom screen, checked without binding a port. Memory-backed so
   // repeated runs do not accumulate DEMO_ROUNDS in a persistent store.
-  const store = await openStore({ memory: true });
-  for (const round of DEMO_ROUNDS) await store.appendRound(round);
-  const state = await buildState(store, DEMO_PLAN_ID);
+  const backroomPlan = P("screen");
+  for (const round of DEMO_ROUNDS) await live.appendRound({ ...round, planId: backroomPlan });
+  const state = await buildState(live, backroomPlan);
   const first = state.rounds[0];
   check("backroom state builds a round", state.rounds.length === 1);
   check(
@@ -374,30 +384,46 @@ async function main(): Promise<void> {
     ["candidates", "reveal", "toggle", "status"].every((id) => page.includes(`id="${id}"`)),
   );
   check("projector page polls /api/state", page.includes("/api/state"));
-  await store.close();
+  usedPlans.push(backroomPlan);
 
-  if (process.env.MONGODB_URI) {
-    const atlas = await openStore();
-    const probeId = `probe-${Date.now().toString(36)}`;
-    const created = await atlas.createPlan({
-      _id: probeId,
-      joinCode: probeId.slice(-4),
-      participants: ["probe"],
-      status: "collecting",
-      slots: {},
-    });
-    await atlas.setSlots(probeId, "probe", { tags: ["atlas"] });
-    const readBack = await atlas.getSlots(probeId, "probe");
-    const found = await atlas.getPlanByJoinCode(probeId.slice(-4));
-    await atlas.setStatus(probeId, "confirmed");
-    await atlas.close();
-    check(
-      "MongoDB: plan written, slots read back, code resolved",
-      created && readBack.tags?.[0] === "atlas" && found?._id === probeId,
-    );
-  } else {
-    console.log("  SKIP  MongoDB check (MONGODB_URI not set, running in memory)");
-  }
+  // A plan brought into existence by an upsert must still be a complete PlanDoc,
+  // not just an _id plus the one field that was written.
+  const implicit = P("implicit");
+  await live.setSlots(implicit, U("m"), { tags: ["y"] });
+  const upserted = await live.getPlan(implicit);
+  check(
+    "an upserted plan is a complete document",
+    upserted?.status === "collecting" &&
+      Array.isArray(upserted?.participants) &&
+      typeof upserted?.joinCode === "string" &&
+      upserted?.slots[U("m")]?.tags?.[0] === "y",
+  );
+  usedPlans.push(implicit);
+
+  const onMongo = Boolean(process.env.MONGODB_URI);
+  check(
+    "every check above ran against MongoDB",
+    onMongo,
+    onMongo ? "" : "(MONGODB_URI not set - ran in memory)",
+  );
+
+  // The in-memory store is the venue-Wi-Fi fallback, so prove it still works.
+  const fallback = await openStore({ memory: true });
+  await fallback.createPlan({
+    _id: "mem", joinCode: "MEM0", participants: [], status: "collecting", slots: {},
+  });
+  await fallback.setSlots("mem", "u", { tags: ["x"] });
+  check(
+    "in-memory fallback still works",
+    (await fallback.getPlanByJoinCode("MEM0"))?._id === "mem" &&
+      (await fallback.getSlots("mem", "u")).tags?.[0] === "x",
+  );
+  await fallback.close();
+
+  for (const planId of usedPlans) await live.deletePlan(planId);
+  for (const userId of usedUsers) await live.deleteUser(userId);
+  check("teardown removed this run's documents", (await live.getPlan(P("1"))) === null);
+  await live.close();
 
   console.log(
     failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`,
