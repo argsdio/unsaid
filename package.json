@@ -9,7 +9,8 @@
     "harness": "tsx src/harness.ts",
     "backroom": "tsx src/backroom/server.ts",
     "polltest": "tsx src/polltest.ts",
-    "venues": "tsx scripts/venues.ts"
+    "venues": "tsx scripts/venues.ts",
+    "demo": "tsx scripts/demo.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.4",

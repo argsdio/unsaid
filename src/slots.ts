@@ -36,7 +36,7 @@ const ASK_ORDER: RequiredSlot[] = [
 // B owns this copy because only B knows which slot is still open. A sends the
 // string back over Spectrum unchanged.
 const QUESTIONS: Record<RequiredSlot, string> = {
-  home: "Where are you coming from tonight? A neighborhood, a landmark or an address.",
+  home: "Where are you coming from? A neighborhood, a landmark or an address.",
   window: "What time works for you? Something like \"after 7\" or \"6 to 10\".",
   maxTravelMin: "How far are you up for travelling? e.g. \"30 min\" or \"not far\".",
   dietary: "Anything I should plan around food-wise? \"I eat everything\" is a fine answer.",

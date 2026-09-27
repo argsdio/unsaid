@@ -1,5 +1,5 @@
 import { type Message, type Space, option, poll } from "spectrum-ts";
-import type { HandleDMResult } from "./contracts.ts";
+import type { HandleDMResult, Occasion } from "./contracts.ts";
 import type { PlanDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
 import { fanOut, sendTo, type SpaceLookup } from "./orchestrator/fanout.ts";
@@ -75,8 +75,9 @@ async function sendHandleDM(
   result: HandleDMResult,
   reason: string,
   prefix = "",
+  occasion?: Occasion,
 ): Promise<void> {
-  const body = await overlayNessieQuestion(userId, result);
+  const body = await overlayNessieQuestion(userId, result, occasion);
   await send(space, prefix ? `${prefix}${body}` : body, reason);
 }
 
@@ -193,7 +194,7 @@ async function deliverOutcome(
   if (result.sent === 0) {
     result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
   }
-  console.log("go", { planId: plan._id, shortlist: outcome.shortlist, poll: pollEnabled, ...result });
+  botLog("go", { planId: plan._id, shortlist: outcome.shortlist, poll: pollEnabled, ...result });
   if (result.failed > 0 && result.sent > 0) {
     await send(
       space,
@@ -235,8 +236,9 @@ export async function onDirectText(
       dm,
       "join: attached + handleDM",
       `You're in (${joined.plan.joinCode}).\n\n`,
+      joined.plan.occasion,
     );
-    console.log("join", { userId, planId: joined.plan._id, joinCode: joined.plan.joinCode });
+    botLog("join", { userId, planId: joined.plan._id, joinCode: joined.plan.joinCode });
     return;
   }
 
@@ -309,13 +311,33 @@ export async function onDirectText(
       dm,
       "create: new plan + handleDM",
       `${shareText(plan.joinCode)}\n\n`,
+      occasion,
     );
-    console.log("create", { userId, planId: plan._id, joinCode: plan.joinCode });
+    botLog("create", { userId, planId: plan._id, joinCode: plan.joinCode });
+    return;
+  }
+
+  // A paused negotiation is `negotiating`, and the person being asked privately
+  // is answering their own agent -- so this has to be read before the
+  // still-working bail-out below, which otherwise swallows the answer and leaves
+  // the plan paused forever.
+  const pausedNow = await store.getNegotiation(current._id);
+  if (pausedNow?.pendingAsk?.userId === userId) {
+    rememberSpace(current._id, userId, tracked);
+    botLog("whisper answer", { userId, planId: current._id, text });
+    const resumed = await resumeAfterWhisper(store, current, text);
+    await deliverOutcome(resumed, store, current, lookup, userId, space);
     return;
   }
 
   if (current.status === "negotiating") {
-    await send(space, "Working on it.", "inbound ignored: status negotiating");
+    await send(
+      space,
+      pausedNow
+        ? "Working on it — waiting on one more answer."
+        : "Working on it.",
+      "inbound ignored: status negotiating",
+    );
     return;
   }
 
@@ -394,16 +416,6 @@ export async function onDirectText(
 
   rememberSpace(current._id, userId, tracked);
 
-  // Answering their own agent's private question, not filling a slot. This must
-  // come before handleDM or the answer is swallowed and the plan hangs forever.
-  const paused = await store.getNegotiation(current._id);
-  if (paused?.pendingAsk?.userId === userId) {
-    botLog("whisper answer", { userId, planId: current._id, text });
-    const resumed = await resumeAfterWhisper(store, current, text);
-    await deliverOutcome(resumed, store, current, lookup, userId, space);
-    return;
-  }
-
   const nextAsk = missingSlots(await store.getSlots(current._id, userId))[0];
   const forSlots = rewriteNessieAnswer(userId, text, nextAsk);
   botLog("handleDM inbound", { userId, planId: current._id, text: forSlots });
@@ -414,6 +426,8 @@ export async function onDirectText(
     userId,
     dm,
     `handleDM next question (missing: ${dm.missing.join(", ") || "none"})`,
+    "",
+    current.occasion,
   );
 }
 
@@ -557,7 +571,7 @@ export async function routeMessage(
   if (message.direction === "outbound") return;
 
   if (spaceKind(space) === "group") {
-    console.log("skipping group message", space.id);
+    botLog("skipping group message", space.id);
     return;
   }
 

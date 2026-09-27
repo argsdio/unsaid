@@ -1,4 +1,4 @@
-import type { HandleDMResult, RequiredSlot } from "./contracts.ts";
+import type { HandleDMResult, Occasion, RequiredSlot } from "./contracts.ts";
 import { botLog } from "./log.ts";
 
 const NESSIE_BASE = "http://api.nessieisreal.com";
@@ -141,13 +141,14 @@ export async function pullDinnerSpend(userId: string): Promise<NessiePull> {
   return { typical, charges, source: "sandbox" };
 }
 
-function budgetQuestion(pull: NessiePull): string {
+function budgetQuestion(pull: NessiePull, occasion: Occasion): string {
   const lines = pull.charges.map((c) => `• ${c.merchant} · $${c.amount}`).join("\n");
   const via = pull.source === "api" ? "Nessie (live)" : "Nessie";
+  // Not "your last dinners" and not "tonight": the plan may be Monday brunch.
   return [
-    `${via} pulled your last dinners:`,
+    `${via} pulled what you usually spend:`,
     lines,
-    `Median of those: $${pull.typical}. Still good for tonight?`,
+    `Median of those: $${pull.typical}. Still good for ${occasion}?`,
   ].join("\n");
 }
 
@@ -169,11 +170,15 @@ export function rewriteNessieAnswer(userId: string, text: string, nextMissing: R
   return `$${typical}`;
 }
 
-export async function overlayNessieQuestion(userId: string, result: HandleDMResult): Promise<string> {
+export async function overlayNessieQuestion(
+  userId: string,
+  result: HandleDMResult,
+  occasion: Occasion = "dinner",
+): Promise<string> {
   if (result.missing[0] !== "budgetCapUSD") return result.reply;
   const pull = await pullDinnerSpend(userId);
   offered.set(userId, pull.typical);
-  const q = budgetQuestion(pull);
+  const q = budgetQuestion(pull, occasion);
   for (const ask of B_BUDGET_ASKS) {
     if (result.reply.includes(ask)) return result.reply.replace(ask, q);
   }

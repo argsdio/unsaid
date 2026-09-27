@@ -1,6 +1,7 @@
 import type { ContentInput, Space } from "spectrum-ts";
 import type { PlanDoc } from "../contracts.ts";
 import type { SpaceRef } from "../plan.ts";
+import { botLog } from "../log.ts";
 
 export type SpaceLookup = {
   get(id: string, extra?: { phone?: string }): Promise<Space>;
@@ -71,7 +72,7 @@ export async function fanOut(
         await dest!.send(content);
       });
       sent += 1;
-      console.log("[unsaid] fan-out ok", userId);
+      botLog("fan-out ok", userId);
     } catch (err) {
       failed += 1;
       console.error("fan-out send failed", userId, err);

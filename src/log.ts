@@ -1,4 +1,8 @@
+// The scripted demo prints a clean transcript, and the running commentary makes
+// that unreadable. Read per call, not once at module load: an import runs before
+// the script that sets it.
 export function botLog(reason: string, detail?: unknown): void {
+  if (process.env.UNSAID_QUIET === "1") return;
   const stamp = new Date().toISOString().slice(11, 19);
   if (detail !== undefined) {
     console.log(`[unsaid ${stamp}] ${reason}`, detail);

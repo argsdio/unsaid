@@ -16,6 +16,7 @@ import { VENUES, filterVenues, findVenueByName, isOpenDuring, matchesVibe, price
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
+import { routeMessage } from "./router.ts";
 import { negotiate, parseAgreement, resumeNegotiation } from "./negotiation.ts";
 import { parseVote, tallyVotes } from "./voting.ts";
 import { resolveDate } from "./resolve/date.ts";
@@ -1221,6 +1222,64 @@ async function main(): Promise<void> {
     "every check above ran against MongoDB",
     onMongo,
     onMongo ? "" : "(MONGODB_URI not set - ran in memory)",
+  );
+
+  // Drive A's router, not just B's lane. Nothing here exercised routeMessage
+  // before, which is why a `status === "negotiating"` bail-out that ran before
+  // the whisper handler went unnoticed: the private question arrived, the answer
+  // was swallowed, and the plan sat paused forever.
+  const drive = async (answer: string) => {
+    const store = await openStore({ memory: true });
+    const A = "+15559001", B = "+15559002";
+    const inbox: Record<string, string[]> = { [A]: [], [B]: [] };
+    const space = (p: string) => ({
+      id: `dm-${p}`, type: "dm" as const, phone: p,
+      async responding(f: () => Promise<void>) { await f(); },
+      async send(c: unknown) { inbox[p]!.push(typeof c === "string" ? c : "[poll]"); },
+    });
+    const inbound = (p: string, t: string) => ({
+      direction: "inbound" as const,
+      content: { type: "text" as const, text: t },
+      sender: { id: p },
+    });
+    const lookup = { async get(id: string) { return space(id.replace("dm-", "")) as never; } } as never;
+    const talk = (p: string, t: string) =>
+      routeMessage(space(p) as never, inbound(p, t) as never, store, lookup);
+
+    // Same neighbourhood, no dietary needs, one tight hedged cap: money is the
+    // only wall, so the hedged person is the only one who can help.
+    const tight = ["east village", "i eat everything", "none", "none", "8pm", "1 hr", "$5 tops, kinda broke rn"];
+    const loose = ["east village", "i eat everything", "none", "none", "8pm", "1 hr", "$60"];
+    await talk(A, "dinner friday");
+    for (const t of tight) await talk(A, t);
+    const planId = (await store.getUser(A))!.activePlanId!;
+    await talk(B, `JOIN ${(await store.getPlan(planId))!.joinCode}`);
+    for (const t of loose) await talk(B, t);
+    await talk(A, "go");
+    const asked = inbox[A]!.at(-1) ?? "";
+    await talk(A, answer);
+    const plan = (await store.getPlan(planId))!;
+    const result = { asked, replied: inbox[A]!.at(-1) ?? "", status: plan.status, shortlist: plan.shortlist ?? [] };
+    await store.close();
+    return result;
+  };
+
+  const saidYes = await drive("yeah ok");
+  check(
+    "the private ask reaches the one person who could move",
+    /could you do \$/i.test(saidYes.asked) && /fine to say no/i.test(saidYes.asked),
+    saidYes.asked.slice(0, 60),
+  );
+  check(
+    "answering it is not swallowed by the negotiating status",
+    saidYes.status === "proposed" && saidYes.shortlist.length > 0,
+    `${saidYes.status} · ${saidYes.shortlist.length} options`,
+  );
+  const saidNo = await drive("sorry, cant");
+  check(
+    "declining ends somewhere rather than hanging",
+    saidNo.status !== "negotiating" && saidNo.replied.length > 0 && !/working on it/i.test(saidNo.replied),
+    `${saidNo.status}: ${saidNo.replied.split("\n")[0]}`,
   );
 
   // The in-memory store is the venue-Wi-Fi fallback, so prove it still works.
