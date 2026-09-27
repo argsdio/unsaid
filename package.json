@@ -10,7 +10,8 @@
     "backroom": "tsx src/backroom/server.ts",
     "polltest": "tsx src/polltest.ts",
     "venues": "tsx scripts/venues.ts",
-    "demo": "tsx scripts/demo.ts"
+    "demo": "tsx scripts/demo.ts",
+    "linktest": "tsx scripts/linktest.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.4",
