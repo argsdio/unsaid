@@ -297,10 +297,15 @@ async function writeBackProfile(
 export async function handleDM(
   input: HandleDMInput,
   store: Store,
-  day: Date = new Date(),
+  dayOverride?: Date,
 ): Promise<HandleDMResult> {
   const now = new Date().toISOString();
   const geocode = grokGeocoder();
+
+  // Times and blackouts resolve against the day the plan is FOR, not today.
+  // "after 7" on a Wednesday for a Friday plan means Friday at 7.
+  const planDoc = await store.getPlan(input.planId);
+  const day = dayOverride ?? (planDoc?.date ? new Date(`${planDoc.date}T12:00:00`) : new Date());
 
   // History is read BEFORE storing this message, so extraction sees what came
   // before rather than the current turn twice.

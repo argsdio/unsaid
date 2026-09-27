@@ -15,6 +15,8 @@ import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
 import { negotiate, parseAgreement, resumeNegotiation } from "./negotiation.ts";
+import { parseVote, tallyVotes } from "./voting.ts";
+import { resolveDate } from "./resolve/date.ts";
 import { isSensitive } from "./resolve/sensitivity.ts";
 
 type FakeUser = {
@@ -548,6 +550,68 @@ async function main(): Promise<void> {
   );
 
   await negStore.close();
+
+  // Voting. "Reply 1, 2 or 3" was an instruction the system could not honour.
+  check(
+    "a vote parses as a number, a hash, a word or a name",
+    parseVote("2", ["a", "mamouns", "c"]) === "mamouns" &&
+      parseVote("#2", ["a", "mamouns", "c"]) === "mamouns" &&
+      parseVote("option 2", ["a", "mamouns", "c"]) === "mamouns" &&
+      parseVote("mamouns falafel", ["a", "mamouns", "c"]) === "mamouns",
+  );
+  check(
+    "nonsense is not a vote, and neither is an out-of-range number",
+    parseVote("what kind of democracy is this", ["a", "b"]) === null &&
+      parseVote("9", ["a", "b"]) === null,
+  );
+  check(
+    "most votes wins",
+    tallyVotes({ u1: "b", u2: "b", u3: "a" }, ["a", "b"]).winner === "b",
+  );
+  check(
+    "a tie falls back to shortlist order, which is fairest-first",
+    tallyVotes({ u1: "a", u2: "b" }, ["a", "b"]).winner === "a",
+  );
+
+  // The plan date. "dinner friday?" was silently planning for today.
+  const wed = new Date("2026-09-30T12:00:00");
+  check(
+    "a weekday in the opening message becomes the plan date",
+    resolveDate("dinner friday?", wed)?.getDay() === 5 &&
+      resolveDate("tomorrow", wed)?.getDate() === 1 &&
+      resolveDate("tonight", wed)?.getDate() === 30,
+  );
+  check(
+    "'next <today>' means next week, a bare weekday means the coming one",
+    resolveDate("next wednesday", wed)?.getDate() === 7 &&
+      resolveDate("wednesday", wed)?.getDate() === 30,
+  );
+  check("an opening with no day at all resolves to nothing", resolveDate("dinner sometime", wed) === null);
+
+  const dateStore = await openStore({ memory: true });
+  await dateStore.createPlan({
+    _id: "dp", joinCode: "DP01", participants: ["du"], status: "collecting", slots: {},
+  });
+  await dateStore.setPlanDate("dp", "2026-10-02");
+  await dateStore.upsertUser({
+    _id: "du", phone: "du",
+    profile: { home: { lat: 40.72, lng: -73.99, label: "East Village" }, tastes: [], preferredSpots: [],
+      blackouts: [{ days: [2], start: "18:00", end: "23:59" }] },
+    onboardedAt: "now", wishlist: [],
+  });
+  await handleDM({ planId: "dp", userId: "du", text: "dinner?" }, dateStore);
+  await handleDM({ planId: "dp", userId: "du", text: "after 7" }, dateStore);
+  const dated = await dateStore.getSlots("dp", "du");
+  check(
+    "times resolve on the plan's day, not today",
+    dated.window?.value?.start.startsWith("2026-10-02") === true,
+    dated.window?.value?.start ?? "unset",
+  );
+  check(
+    "a Tuesday blackout does not clip a Friday plan",
+    dated.window?.value !== null && dated.window?.value !== undefined,
+  );
+  await dateStore.close();
 
   // The status command: the thing that makes every other bug debuggable.
   const stStore = await openStore({ memory: true });

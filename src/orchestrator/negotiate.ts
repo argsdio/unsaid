@@ -18,6 +18,12 @@ export type NegotiateOutcome =
 // The rounds, objections and concessions live in src/negotiation.ts (contract
 // 12). This file gathers participants, logs, and turns the outcome into a
 // message -- it does not decide anything.
+// The day the plan is for, so window intersection and blackout clipping use the
+// right weekday.
+function planDay(plan: PlanDoc): Date {
+  return plan.date ? new Date(`${plan.date}T12:00:00`) : new Date();
+}
+
 async function participantsOf(store: Store, plan: PlanDoc): Promise<Participant[]> {
   const people: Participant[] = [];
   for (const userId of plan.participants) {
@@ -36,12 +42,12 @@ export async function resumeAfterWhisper(
   text: string,
 ): Promise<NegotiateOutcome> {
   const people = await participantsOf(store, plan);
-  return toOutcome(store, plan, await resumeNegotiation(store, plan._id, people, text));
+  return toOutcome(store, plan, await resumeNegotiation(store, plan._id, people, text, planDay(plan)));
 }
 
 export async function runNegotiation(store: Store, plan: PlanDoc): Promise<NegotiateOutcome> {
   const people = await participantsOf(store, plan);
-  return toOutcome(store, plan, await negotiate(store, plan._id, people));
+  return toOutcome(store, plan, await negotiate(store, plan._id, people, planDay(plan)));
 }
 
 async function toOutcome(

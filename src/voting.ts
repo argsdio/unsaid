@@ -3,8 +3,19 @@ import { venueById } from "./venues.ts";
 // "2", "#2", "option 2", "number 2", or the venue's name. People answer a
 // numbered list in all of these ways, and a vote that is not recognised is a
 // dead end -- which is exactly the failure this module exists to remove.
+// Apostrophes are dropped rather than turned into spaces, so "Mamoun's Falafel"
+// and "mamouns falafel" are the same string by the time they are compared.
+function flatten(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/['\u2019\u02bc`]/g, "")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function parseVote(text: string, shortlist: string[]): string | null {
-  const clean = text.trim().toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const clean = flatten(text);
   if (!clean) return null;
 
   const numeric = clean.match(/^(?:option|number|no|#)?\s*(\d{1,2})$/);
@@ -15,7 +26,7 @@ export function parseVote(text: string, shortlist: string[]): string | null {
 
   // Name match, loose in both directions: "ess a bagel" vs "Ess-a-Bagel".
   for (const venueId of shortlist) {
-    const name = venueById(venueId)?.name.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+    const name = venueById(venueId) ? flatten(venueById(venueId)!.name) : "";
     if (!name) continue;
     if (clean === name || (clean.length >= 4 && (name.includes(clean) || clean.includes(name)))) {
       return venueId;

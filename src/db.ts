@@ -20,6 +20,7 @@ export type Store = {
   getPlanByJoinCode(code: string): Promise<PlanDoc | null>;
   addParticipant(planId: string, userId: string): Promise<void>;
   setStatus(planId: string, status: PlanStatus): Promise<void>;
+  setPlanDate(planId: string, date: string): Promise<void>;
   setShortlist(planId: string, venueIds: string[]): Promise<void>;
   // One vote per person; voting again replaces the previous choice.
   recordVote(planId: string, userId: string, venueId: string): Promise<void>;
@@ -107,6 +108,9 @@ function memoryStore(): Store {
     },
     async setStatus(planId, status) {
       ensure(planId).status = status;
+    },
+    async setPlanDate(planId, date) {
+      ensure(planId).date = date;
     },
     async setShortlist(planId, venueIds) {
       ensure(planId).shortlist = [...venueIds];
@@ -266,6 +270,9 @@ async function mongoStore(uri: string): Promise<Store> {
         { $set: { status }, $setOnInsert: seedExcept(planId, ["status"]) },
         { upsert: true },
       );
+    },
+    async setPlanDate(planId, date) {
+      await plans.updateOne({ _id: planId }, { $set: { date } });
     },
     async setShortlist(planId, venueIds) {
       await plans.updateOne({ _id: planId }, { $set: { shortlist: venueIds } });

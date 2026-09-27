@@ -5,6 +5,7 @@ import type { Store } from "./db.ts";
 import { fanOut, sendTo, type SpaceLookup } from "./orchestrator/fanout.ts";
 import { type NegotiateOutcome, resumeAfterWhisper, runNegotiation } from "./orchestrator/negotiate.ts";
 import { parseVote, tallyVotes } from "./voting.ts";
+import { resolveDate } from "./resolve/date.ts";
 import { venueById } from "./venues.ts";
 import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
 import {
@@ -254,6 +255,14 @@ export async function onDirectText(
 
   if (!current) {
     const plan = await createPlan(store, userId, tracked);
+
+    // "dinner friday?" means Friday. Without this every plan is silently today.
+    const when = resolveDate(text);
+    if (when) {
+      const iso = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}-${String(when.getDate()).padStart(2, "0")}`;
+      await store.setPlanDate(plan._id, iso);
+      botLog("plan date", { planId: plan._id, from: text, date: iso });
+    }
     const dm = await handleDM({ planId: plan._id, userId, text }, store);
     await sendHandleDM(
       space,
