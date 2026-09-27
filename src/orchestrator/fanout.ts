@@ -1,4 +1,4 @@
-import type { Space } from "spectrum-ts";
+import type { ContentInput, Space } from "spectrum-ts";
 import type { PlanDoc } from "../contracts.ts";
 import type { SpaceRef } from "../plan.ts";
 
@@ -21,7 +21,7 @@ export async function sendTo(
   lookup: SpaceLookup,
   stored: Record<string, SpaceRef>,
   userId: string,
-  text: string,
+  content: ContentInput,
   fromGo: { userId: string; space: Space },
 ): Promise<boolean> {
   const ref = stored[userId];
@@ -32,7 +32,7 @@ export async function sendTo(
   }
   try {
     await dest.responding(async () => {
-      await dest.send(text);
+      await dest.send(content);
     });
     return true;
   } catch (err) {
@@ -45,7 +45,7 @@ export async function fanOut(
   lookup: SpaceLookup,
   plan: PlanDoc,
   stored: Record<string, SpaceRef>,
-  text: string,
+  content: ContentInput,
   fromGo: { userId: string; space: Space },
 ): Promise<{ sent: number; failed: number }> {
   let sent = 0;
@@ -68,7 +68,7 @@ export async function fanOut(
 
     try {
       await dest.responding(async () => {
-        await dest!.send(text);
+        await dest!.send(content);
       });
       sent += 1;
       console.log("[unsaid] fan-out ok", userId);

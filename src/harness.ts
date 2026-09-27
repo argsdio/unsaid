@@ -594,6 +594,24 @@ async function main(): Promise<void> {
   check("and never the same line twice running", doneRepeats === 0);
   await doneStore.close();
 
+  // A tie must not be decided for people. With two participants ANY
+  // disagreement ties, so silently taking the higher-scoring option overrules
+  // somebody every single time.
+  check(
+    "a two-way split has no winner by count",
+    tallyVotes({ u1: "a", u2: "b" }, ["a", "b"]).counts.a === 1 &&
+      tallyVotes({ u1: "a", u2: "b" }, ["a", "b"]).counts.b === 1,
+  );
+  check(
+    "a clear majority does have one",
+    tallyVotes({ u1: "b", u2: "b", u3: "a" }, ["a", "b"]).winner === "b",
+  );
+  check(
+    "a priced poll label still resolves to its venue",
+    parseVote("Joe's Pizza · $12", ["joes-pizza", "taim"]) === "joes-pizza" &&
+      parseVote("Mamoun's Falafel · $10", ["mamouns", "taim"]) === "mamouns",
+  );
+
   // Meta-turns. A question is not an answer -- previously nine asides walked a
   // person through onboarding and all the way to "got everything I need".
   check(

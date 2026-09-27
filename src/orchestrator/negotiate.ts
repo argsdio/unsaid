@@ -115,7 +115,12 @@ async function toOutcome(
   return {
     ok: true,
     shortlist: result.shortlist,
-    poll: { title: `Tonight at ${time} — which one?`, options: venues.map((v) => v.name) },
+    poll: {
+      title: `Tonight at ${time} — which one?`,
+      // Price in the label so the native poll carries the same information as
+      // the text list. parseVote still matches these by name.
+      options: venues.map((v) => `${v.name} · $${v.estCostUSD}`),
+    },
     text: [`These all work for everyone, tonight at ${time}:`, "", ...lines, "", replyHint].join("\n"),
   };
 }

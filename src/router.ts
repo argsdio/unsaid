@@ -1,4 +1,4 @@
-import type { Message, Space } from "spectrum-ts";
+import { type Message, type Space, option, poll } from "spectrum-ts";
 import type { HandleDMResult } from "./contracts.ts";
 import type { PlanDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
@@ -168,8 +168,24 @@ async function deliverOutcome(
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
-  const result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
-  console.log("go", { planId: plan._id, shortlist: outcome.shortlist, ...result });
+  // Try the native poll first: it renders as a real iMessage poll and taps come
+  // back as poll_option votes. Fall back to the numbered text if the line or the
+  // client will not take it -- losing the message entirely would be far worse
+  // than losing the widget.
+  let result = { sent: 0, failed: 0 };
+  if (outcome.poll) {
+    try {
+      const card = poll(outcome.poll.title, ...outcome.poll.options.map((o) => option(o)));
+      result = await fanOut(lookup, latest, spacesFor(latest), card, { userId, space });
+    } catch (err) {
+      console.error("poll send failed, falling back to text", err);
+      result = { sent: 0, failed: 0 };
+    }
+  }
+  if (result.sent === 0) {
+    result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
+  }
+  console.log("go", { planId: plan._id, shortlist: outcome.shortlist, poll: Boolean(outcome.poll), ...result });
   if (result.failed > 0 && result.sent > 0) {
     await send(
       space,
@@ -421,17 +437,35 @@ async function castVote(
     return;
   }
 
-  await store.setStatus(plan._id, "confirmed");
-  const settled = (await store.getPlan(plan._id)) ?? latest;
-  // Name a tie rather than announcing a winner nobody outvoted -- somebody who
-  // voted the other way should see why this one won, not just that it did.
   const top = counts[winner] ?? 0;
   const tied = Object.values(counts).filter((n) => n === top).length > 1;
-  const tally = tied
-    ? `Split ${Object.values(counts).join("-")}, so I went with the one that scored best for everyone.`
-    : top === need
-      ? "Unanimous."
-      : `${top} of ${need} votes.`;
+
+  // A tie is not a result. With two people ANY disagreement ties, so silently
+  // taking the higher-scoring option overrules somebody every single time --
+  // which is exactly what "what kind of democracy is this" was about. Hand it
+  // back: say which one the scores favour, and let them settle it.
+  if (tied) {
+    const split = Object.values(counts).join("–");
+    await fanOut(
+      lookup,
+      latest,
+      spacesFor(latest),
+      [
+        `${split} split — no clear winner.`,
+        "",
+        `${venue.name} edges it on everyone's scores.`,
+        "",
+        `Tap 👍 to take it, or reply with a different number to switch your pick.`,
+      ].join("\n"),
+      { userId, space },
+    );
+    botLog("vote: tie, handed back", { counts });
+    return;
+  }
+
+  await store.setStatus(plan._id, "confirmed");
+  const settled = (await store.getPlan(plan._id)) ?? latest;
+  const tally = top === need ? "Unanimous." : `${top} of ${need} votes.`;
   const result = await fanOut(
     lookup,
     settled,
@@ -529,7 +563,13 @@ export async function routeMessage(
     const plan = await activePlan(store, userId);
     if (!plan || plan.status !== "proposed") return;
     const picked = parseVote(title, plan.shortlist ?? []);
-    if (picked) await castVote(space, store, lookup, plan, userId, picked);
+    if (picked) {
+      await castVote(space, store, lookup, plan, userId, picked);
+      return;
+    }
+    // A tap we cannot match to an option would otherwise vanish silently.
+    const names = (plan.shortlist ?? []).map((id, i) => `${i + 1}. ${venueById(id)?.name ?? id}`).join("\n");
+    await send(space, `I didn't catch which one that was. Reply with a number:\n\n${names}`, "poll vote unmatched");
     return;
   }
 
