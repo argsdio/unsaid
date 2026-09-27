@@ -1221,7 +1221,11 @@ async function main(): Promise<void> {
   // The backroom screen, checked without binding a port. Memory-backed so
   // repeated runs do not accumulate DEMO_ROUNDS in a persistent store.
   const backroomPlan = P("screen");
-  for (const round of DEMO_ROUNDS) await live.appendRound({ ...round, planId: backroomPlan });
+  // Stamped now, not at fixture-import time, so this run is the newest plan in
+  // the cluster while the check below runs.
+  for (const round of DEMO_ROUNDS) {
+    await live.appendRound({ ...round, planId: backroomPlan, at: new Date().toISOString() });
+  }
   const state = await buildState(live, backroomPlan);
   const first = state.rounds[0];
   check("backroom state builds a round", state.rounds.length === 1);
@@ -1250,7 +1254,54 @@ async function main(): Promise<void> {
     ["candidates", "reveal", "toggle", "status"].every((id) => page.includes(`id="${id}"`)),
   );
   check("projector page polls /api/state", page.includes("/api/state"));
+  check(
+    "the screen reports which plan it is showing, so fixtures are never mistaken for a demo",
+    state.planId === backroomPlan && state.demo === false,
+  );
   usedPlans.push(backroomPlan);
+
+  // The reveal is projected, so the API must not hand out phone numbers.
+  const maskStore = await openStore({ memory: true });
+  await maskStore.setSlots("p-mask", "+12404754199", {
+    home: { raw: "Columbia University", value: { lat: 40.8, lng: -73.96, label: "Columbia" }, confidence: "high" },
+  });
+  await maskStore.setSlots("p-mask", "+19258956296", {
+    home: { raw: "362 riverside drive", value: { lat: 40.8, lng: -73.97, label: "Riverside" }, confidence: "high" },
+  });
+  const masked = await buildState(maskStore, "p-mask");
+  check(
+    "the projector shows the last four, never a whole phone number",
+    Object.keys(masked.said).sort().join(",") === "···4199,···6296" &&
+      !JSON.stringify(masked.said).includes("2404754199"),
+    Object.keys(masked.said).join(" · "),
+  );
+  await maskStore.close();
+
+  // With no planId in the URL the projector follows whatever negotiated last.
+  // The seeded rounds are stamped at import, so they look newer than a real
+  // plan from earlier in the evening and have to be excluded by name.
+  const followStore = await openStore({ memory: true });
+  check(
+    "with nothing negotiated yet there is no plan to follow",
+    (await followStore.latestRoundPlanId([DEMO_PLAN_ID])) === null,
+  );
+  await followStore.createPlan({
+    _id: "p-real", joinCode: "REAL", participants: [], status: "confirmed", slots: {},
+  });
+  await followStore.appendRound({ ...DEMO_ROUNDS[0]!, planId: "p-real", at: "2026-01-01T00:00:00.000Z" });
+  await followStore.appendRound({ ...DEMO_ROUNDS[0]!, planId: DEMO_PLAN_ID, at: "2026-12-31T00:00:00.000Z" });
+  check(
+    "and the real plan wins even when the seeded rounds are newer",
+    (await followStore.latestRoundPlanId([DEMO_PLAN_ID])) === "p-real",
+  );
+  // A killed run leaves rounds behind with no plan. Following those is how the
+  // projector ends up showing a negotiation that no longer exists.
+  await followStore.appendRound({ ...DEMO_ROUNDS[0]!, planId: "p-orphan", at: "2026-12-30T00:00:00.000Z" });
+  check(
+    "and a round whose plan is gone is skipped, not followed",
+    (await followStore.latestRoundPlanId([DEMO_PLAN_ID])) === "p-real",
+  );
+  await followStore.close();
 
   // A plan brought into existence by an upsert must still be a complete PlanDoc,
   // not just an _id plus the one field that was written.

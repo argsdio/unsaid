@@ -22,7 +22,9 @@ const LABEL: Record<RequiredSlot, string> = {
 
 // userId is the phone handle, so the last four digits are how people actually
 // identify each other. Short non-numeric ids (tests, fixtures) print in full.
-function shortName(userId: string): string {
+// The backroom screen shares this, so a number is masked the same way on a DM
+// and on the projector.
+export function shortName(userId: string): string {
   const digits = userId.replace(/\D/g, "");
   return digits.length >= 4 ? `···${digits.slice(-4)}` : userId;
 }

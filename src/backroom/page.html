@@ -183,8 +183,9 @@
       document.getElementById("transcript").innerHTML = renderTranscript(state.rounds);
       document.getElementById("candidates").innerHTML = renderCandidates(state.rounds);
       document.getElementById("reveal").innerHTML = renderReveal(state.said, state.merged);
+      const whose = state.demo ? "seeded demo rounds" : `plan ${state.planId.slice(0, 8)}`;
       document.getElementById("status").textContent =
-        `round ${state.rounds.length || 0} · live`;
+        `${whose} · round ${state.rounds.length || 0} · live`;
     } catch (err) {
       document.getElementById("status").textContent = "disconnected";
     }

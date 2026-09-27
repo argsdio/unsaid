@@ -59,6 +59,11 @@ export type Store = {
 
   appendRound(round: RoundLog): Promise<void>;
   listRounds(planId: string): Promise<RoundLog[]>;
+  // Which plan negotiated most recently, ignoring rounds whose plan is gone.
+  // The projector follows it rather than being handed an id mid-demo.
+  // `exclude` is for the seeded demo rounds, which are stamped at import and
+  // would otherwise always look like the newest.
+  latestRoundPlanId(exclude?: string[]): Promise<string | null>;
 
   // A negotiation paused on a human. Persisted rather than held in memory so it
   // survives both the minutes someone takes to reply and a process restart.
@@ -230,6 +235,15 @@ function memoryStore(): Store {
     },
     async listRounds(planId) {
       return rounds.filter((r) => r.planId === planId).sort((a, b) => a.round - b.round);
+    },
+    async latestRoundPlanId(exclude = []) {
+      const skip = new Set(exclude);
+      const newestFirst = [...rounds].sort((a, b) => (a.at < b.at ? 1 : -1));
+      for (const round of newestFirst) {
+        if (skip.has(round.planId)) continue;
+        if (plans.has(round.planId)) return round.planId;
+      }
+      return null;
     },
     async saveNegotiation(state) {
       negotiations.set(state.planId, state);
@@ -406,6 +420,21 @@ async function mongoStore(uri: string): Promise<Store> {
     },
     async listRounds(planId) {
       return rounds.find({ planId }).sort({ round: 1 }).toArray();
+    },
+    async latestRoundPlanId(exclude = []) {
+      const recent = await rounds
+        .find(exclude.length ? { planId: { $nin: exclude } } : {})
+        .sort({ at: -1 })
+        .limit(50)
+        .toArray();
+      for (const round of recent) {
+        // Rounds outlive their plan when a run is killed before teardown.
+        // Following one of those puts a dead negotiation on the projector.
+        if (await plans.findOne({ _id: round.planId }, { projection: { _id: 1 } })) {
+          return round.planId;
+        }
+      }
+      return null;
     },
     async saveNegotiation(state) {
       await negotiations.replaceOne({ planId: state.planId }, state, { upsert: true });
