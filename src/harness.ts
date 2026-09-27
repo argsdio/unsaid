@@ -473,6 +473,42 @@ async function main(): Promise<void> {
   );
   await mindStore.close();
 
+  // Leaving a plan: membership AND slots must go, or `go` waits forever.
+  const leaveStore = await openStore({ memory: true });
+  await leaveStore.createPlan({
+    _id: "lv", joinCode: "LV01", participants: ["host", "quitter"],
+    status: "collecting", slots: {},
+  });
+  await leaveStore.setSlots("lv", "quitter", { budgetCapUSD: { raw: "5", value: 5, confidence: "high" } });
+  await leaveStore.setSlots("lv", "host", { budgetCapUSD: { raw: "40", value: 40, confidence: "high" } });
+  await leaveStore.removeParticipant("lv", "quitter");
+  const afterLeave = await leaveStore.getPlan("lv");
+  check("removeParticipant drops membership", afterLeave?.participants.join() === "host");
+  check(
+    "and drops their stale slots so they stop constraining the group",
+    afterLeave?.slots.quitter === undefined && afterLeave?.slots.host !== undefined,
+  );
+
+  // A narrow favourite write, so nobody needs upsertUser for one field.
+  await leaveStore.setActivePlan("fav", "lv");
+  await leaveStore.addFavorite("fav", "joes-pizza");
+  await leaveStore.addFavorite("fav", "joes-pizza");
+  const favUser = await leaveStore.getUser("fav");
+  check("addFavorite is idempotent", favUser?.profile.preferredSpots.join() === "joes-pizza");
+  check("addFavorite leaves the active plan alone", favUser?.activePlanId === "lv");
+
+  // upsertUser must MERGE, not replace -- the two stores disagreed before.
+  await leaveStore.upsertUser({
+    _id: "fav", phone: "fav",
+    profile: { tastes: ["pizza"], preferredSpots: ["joes-pizza"] },
+    wishlist: [],
+  });
+  check(
+    "upsertUser preserves fields the caller omitted",
+    (await leaveStore.getUser("fav"))?.activePlanId === "lv",
+  );
+  await leaveStore.close();
+
   // setActivePlan must not disturb what onboarding built.
   const joinStore = live;
   await joinStore.upsertUser({

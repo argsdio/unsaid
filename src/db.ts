@@ -16,6 +16,10 @@ export type Store = {
   // demo runs, and so tests can clean up after themselves against a real cluster.
   deletePlan(planId: string): Promise<void>;
   deleteUser(userId: string): Promise<void>;
+  // Leaving a plan must drop the person's slots as well as their membership.
+  // Membership alone kept `go` waiting on them forever, and their stale slots
+  // still fed mergeConstraints.
+  removeParticipant(planId: string, userId: string): Promise<void>;
 
   getSlots(planId: string, userId: string): Promise<Slots>;
   getAllSlots(planId: string): Promise<Record<string, Slots>>;
@@ -28,6 +32,8 @@ export type Store = {
   // A calls this on join. Never upsertUser, which replaces the whole document
   // and would wipe the profile and onboarding state that B builds.
   setActivePlan(userId: string, planId: string): Promise<void>;
+  // Narrow write so callers never reach for upsertUser to save one field.
+  addFavorite(userId: string, venueId: string): Promise<void>;
   clearActivePlan(userId: string): Promise<void>;
   upsertUser(user: UserDoc): Promise<void>;
 
@@ -96,6 +102,16 @@ function memoryStore(): Store {
     async deleteUser(userId) {
       users.delete(userId);
     },
+    async removeParticipant(planId, userId) {
+      const plan = plans.get(planId);
+      if (!plan) return;
+      const { [userId]: _dropped, ...rest } = plan.slots;
+      plans.set(planId, {
+        ...plan,
+        participants: plan.participants.filter((id) => id !== userId),
+        slots: rest,
+      });
+    },
     async getSlots(planId, userId) {
       return plans.get(planId)?.slots[userId] ?? {};
     },
@@ -126,8 +142,26 @@ function memoryStore(): Store {
       if (!existing) return;
       users.set(userId, { ...existing, activePlanId: undefined });
     },
+    async addFavorite(userId, venueId) {
+      const existing = users.get(userId);
+      const base = existing ?? {
+        _id: userId, phone: userId,
+        profile: { tastes: [], preferredSpots: [] }, wishlist: [],
+      };
+      users.set(userId, {
+        ...base,
+        profile: {
+          ...base.profile,
+          preferredSpots: [...new Set([...base.profile.preferredSpots, venueId])],
+        },
+      });
+    },
+    // Merges, matching the Mongo implementation's $set semantics. Replacing the
+    // document here meant a caller who omitted activePlanId silently dropped it,
+    // so the same call behaved differently depending on which store was running.
     async upsertUser(user) {
-      users.set(user._id, user);
+      const existing = users.get(user._id);
+      users.set(user._id, existing ? { ...existing, ...user } : user);
     },
     async appendRound(round) {
       rounds.push(round);
@@ -207,6 +241,12 @@ async function mongoStore(uri: string): Promise<Store> {
     async deleteUser(userId) {
       await users.deleteOne({ _id: userId });
     },
+    async removeParticipant(planId, userId) {
+      await plans.updateOne(
+        { _id: planId },
+        { $pull: { participants: userId }, $unset: { [`slots.${userId}`]: "" } },
+      );
+    },
     async getSlots(planId, userId) {
       const plan = await plans.findOne({ _id: planId });
       return plan?.slots?.[userId] ?? {};
@@ -248,6 +288,16 @@ async function mongoStore(uri: string): Promise<Store> {
     },
     async clearActivePlan(userId) {
       await users.updateOne({ _id: userId }, { $unset: { activePlanId: "" } });
+    },
+    async addFavorite(userId, venueId) {
+      await users.updateOne(
+        { _id: userId },
+        {
+          $addToSet: { "profile.preferredSpots": venueId },
+          $setOnInsert: { phone: userId, wishlist: [] },
+        },
+        { upsert: true },
+      );
     },
     async upsertUser(user) {
       const { _id, ...rest } = user;
