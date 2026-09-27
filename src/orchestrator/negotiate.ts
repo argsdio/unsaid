@@ -98,12 +98,18 @@ async function toOutcome(
     };
   }
 
-  const clock = time.slice(11, 16);
+  // pickTime already returns a formatted clock ("7:00 PM"), not an ISO string.
+  // Slicing it produced an empty string and the message read "tonight at :".
   const lines = venues.map((v, i) => `${i + 1}. ${v.name} (${v.neighborhood}) · about $${v.estCostUSD}`);
+  const choices = venues.map((_, i) => i + 1);
+  const replyHint =
+    choices.length === 2
+      ? "Reply 1 or 2."
+      : `Reply ${choices.slice(0, -1).join(", ")} or ${choices[choices.length - 1]}.`;
   return {
     ok: true,
     shortlist: result.shortlist,
-    poll: { title: `Tonight at ${clock} — which one?`, options: venues.map((v) => v.name) },
-    text: [`These all work for everyone, tonight at ${clock}:`, "", ...lines, "", "Reply 1, 2 or 3."].join("\n"),
+    poll: { title: `Tonight at ${time} — which one?`, options: venues.map((v) => v.name) },
+    text: [`These all work for everyone, tonight at ${time}:`, "", ...lines, "", replyHint].join("\n"),
   };
 }

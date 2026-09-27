@@ -224,6 +224,10 @@ export type PlanDoc = {
   slots: Record<string, Slots>; // B
   merged?: MergedConstraints; // B
   chosen?: Candidate; // A
+  // The options that went out, and who picked what. Stored so a reply of "2"
+  // can be resolved to a venue, and so a vote survives a restart.
+  shortlist?: string[];
+  votes?: Record<string, string>;
 };
 
 export type UserDoc = {

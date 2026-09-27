@@ -4,6 +4,8 @@ import type { PlanDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
 import { fanOut, sendTo, type SpaceLookup } from "./orchestrator/fanout.ts";
 import { type NegotiateOutcome, resumeAfterWhisper, runNegotiation } from "./orchestrator/negotiate.ts";
+import { parseVote, tallyVotes } from "./voting.ts";
+import { venueById } from "./venues.ts";
 import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
 import {
   abandonPlan,
@@ -160,6 +162,7 @@ async function deliverOutcome(
     return;
   }
 
+  if (outcome.shortlist.length > 1) await store.setShortlist(plan._id, outcome.shortlist);
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
@@ -278,7 +281,41 @@ export async function onDirectText(
       await onConfirm(space, userId, store, lookup);
       return;
     }
-    await send(space, "The plan is already out. Tap 👍 on the card to confirm.", "inbound ignored: status proposed");
+
+    const shortlist = current.shortlist ?? [];
+    if (shortlist.length > 1) {
+      const picked = parseVote(text, shortlist);
+      if (picked) {
+        await castVote(space, store, lookup, current, userId, picked);
+        return;
+      }
+    }
+
+    // Not a vote and not a tapback. Previously every one of these got the same
+    // canned line, twice in a row if you kept talking. Say something that
+    // depends on what the person has actually done.
+    const mine = current.votes?.[userId];
+    if (mine) {
+      const outstanding = current.participants.length - Object.keys(current.votes ?? {}).length;
+      await send(
+        space,
+        outstanding > 0
+          ? `You picked ${venueById(mine)?.name ?? mine}. Waiting on ${outstanding} more.`
+          : `You picked ${venueById(mine)?.name ?? mine}. Counting them now.`,
+        "proposed: already voted",
+      );
+    } else if (shortlist.length > 1) {
+      const options = shortlist
+        .map((id, i) => `${i + 1}. ${venueById(id)?.name ?? id}`)
+        .join("\n");
+      await send(
+        space,
+        `Still open — reply with a number and I'll count it.\n\n${options}`,
+        "proposed: nudge to vote",
+      );
+    } else {
+      await send(space, "Tap 👍 on the card if that works for you.", "proposed: nudge to confirm");
+    }
     return;
   }
 
@@ -305,6 +342,58 @@ export async function onDirectText(
     dm,
     `handleDM next question (missing: ${dm.missing.join(", ") || "none"})`,
   );
+}
+
+// A vote arrives as "2", "#2", "option 2" or the venue's name. When the last
+// person votes, the winner is announced to everyone.
+async function castVote(
+  space: Space,
+  store: Store,
+  lookup: SpaceLookup,
+  plan: PlanDoc,
+  userId: string,
+  venueId: string,
+): Promise<void> {
+  await store.recordVote(plan._id, userId, venueId);
+  const latest = (await store.getPlan(plan._id)) ?? plan;
+  const votes = latest.votes ?? {};
+  const shortlist = latest.shortlist ?? [];
+  const cast = Object.keys(votes).length;
+  const need = latest.participants.length;
+  const name = venueById(venueId)?.name ?? venueId;
+  botLog("vote", { userId, venueId, cast, need });
+
+  if (cast < need) {
+    await send(space, `${name} — got it. Waiting on ${need - cast} more.`, "vote recorded");
+    return;
+  }
+
+  const { winner, counts } = tallyVotes(votes, shortlist);
+  const venue = winner ? venueById(winner) : undefined;
+  if (!venue || !winner) {
+    await send(space, `${name} — got it.`, "vote recorded, no winner");
+    return;
+  }
+
+  await store.setStatus(plan._id, "confirmed");
+  const settled = (await store.getPlan(plan._id)) ?? latest;
+  // Name a tie rather than announcing a winner nobody outvoted -- somebody who
+  // voted the other way should see why this one won, not just that it did.
+  const top = counts[winner] ?? 0;
+  const tied = Object.values(counts).filter((n) => n === top).length > 1;
+  const tally = tied
+    ? `Split ${Object.values(counts).join("-")}, so I went with the one that scored best for everyone.`
+    : top === need
+      ? "Unanimous."
+      : `${top} of ${need} votes.`;
+  const result = await fanOut(
+    lookup,
+    settled,
+    spacesFor(settled),
+    `Settled: ${venue.name} (${venue.neighborhood}) · about $${venue.estCostUSD}. ${tally}`,
+    { userId, space },
+  );
+  botLog("vote: settled", { winner, counts, ...result });
 }
 
 async function onConfirm(
@@ -379,6 +468,22 @@ export async function routeMessage(
       return;
     }
     await onConfirm(space, userId, store, lookup);
+    return;
+  }
+
+  // A tap on a native poll. Spectrum delivers it as its own content kind rather
+  // than as text, so without this the vote is silently dropped.
+  if (message.content.type === "poll_option") {
+    const userId = senderId(message, space);
+    const choice = message.content as { selected?: boolean; title?: string; option?: { title?: string } };
+    const title = choice.option?.title ?? choice.title ?? "";
+    botLog("inbound poll vote", { userId, title, selected: choice.selected });
+    if (choice.selected === false || !title) return;
+
+    const plan = await activePlan(store, userId);
+    if (!plan || plan.status !== "proposed") return;
+    const picked = parseVote(title, plan.shortlist ?? []);
+    if (picked) await castVote(space, store, lookup, plan, userId, picked);
     return;
   }
 

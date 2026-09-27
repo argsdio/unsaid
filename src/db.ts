@@ -20,6 +20,9 @@ export type Store = {
   getPlanByJoinCode(code: string): Promise<PlanDoc | null>;
   addParticipant(planId: string, userId: string): Promise<void>;
   setStatus(planId: string, status: PlanStatus): Promise<void>;
+  setShortlist(planId: string, venueIds: string[]): Promise<void>;
+  // One vote per person; voting again replaces the previous choice.
+  recordVote(planId: string, userId: string, venueId: string): Promise<void>;
   // Full teardown: the plan, its rounds and its messages. Used to reset between
   // demo runs, and so tests can clean up after themselves against a real cluster.
   deletePlan(planId: string): Promise<void>;
@@ -104,6 +107,13 @@ function memoryStore(): Store {
     },
     async setStatus(planId, status) {
       ensure(planId).status = status;
+    },
+    async setShortlist(planId, venueIds) {
+      ensure(planId).shortlist = [...venueIds];
+    },
+    async recordVote(planId, userId, venueId) {
+      const plan = ensure(planId);
+      plan.votes = { ...(plan.votes ?? {}), [userId]: venueId };
     },
     async deletePlan(planId) {
       plans.delete(planId);
@@ -256,6 +266,12 @@ async function mongoStore(uri: string): Promise<Store> {
         { $set: { status }, $setOnInsert: seedExcept(planId, ["status"]) },
         { upsert: true },
       );
+    },
+    async setShortlist(planId, venueIds) {
+      await plans.updateOne({ _id: planId }, { $set: { shortlist: venueIds } });
+    },
+    async recordVote(planId, userId, venueId) {
+      await plans.updateOne({ _id: planId }, { $set: { [`votes.${userId}`]: venueId } });
     },
     async deletePlan(planId) {
       await Promise.all([
