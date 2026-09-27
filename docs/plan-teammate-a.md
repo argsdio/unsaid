@@ -283,6 +283,36 @@ Everything below is built, exported and covered by `npm run harness` (51 asserti
 - **`openStore({ memory: true })`** forces the in-memory store even when `MONGODB_URI` is set. Useful if A wants deterministic tests of her own router without writing to Atlas.
 - **`npm run harness`** runs the whole of B's lane plus a live MongoDB probe; **`npm run backroom`** serves the projector view on port 4321.
 
+### What changed overnight — read this before touching the router
+
+All of it is pushed and covered by `npm run harness` (122 assertions).
+
+**Four bugs from a real run, three of them B's:**
+
+| Bug | Fix |
+|---|---|
+| "tonight at **:**" — the time rendered empty | `pickTime` returns a formatted clock, not an ISO string; it was being sliced as though it were |
+| "Reply 1, 2 or 3" printed for a two-option list | The hint now matches the count |
+| **Replying "2" did nothing** | There was no vote handler at all. Now there is — see below |
+| The same canned line repeated verbatim to anything | Replies now depend on what the person has done, and rotate |
+
+**Voting exists now.** `PlanDoc.shortlist` and `PlanDoc.votes` are written when options go out. A reply parses as `2`, `#2`, `option 2` or the venue's name; the last vote settles the plan, announces the winner to everyone, and names a tie rather than resolving it silently. Native poll taps arrive as `poll_option` content, not text, and are handled in `routeMessage` — they were being dropped.
+
+**Polls are supported on iMessage.** The provider README lists them and the built code has `pollStream`. `NegotiateOutcome` now carries a ready `poll: { title, options }` payload. Sending it needs `fanOut` to accept a `ContentBuilder` rather than a `string` — that is the one upgrade left, and it is yours.
+
+**Meta-turns.** `help`, `why`, `who else`, `what are my options`, a bare `?` or an emoji are recognised as asides. They are answered and never counted as an answer to a slot. Before this, nine ordinary questions walked somebody through onboarding and into a plan built entirely on assumed defaults.
+
+**Plans have a date.** `PlanDoc.date` is set from the creator's opening message, so "dinner friday?" means Friday. `handleDM` reads it off the plan itself, so no caller changed. Times and blackouts now resolve against the plan's weekday rather than today's.
+
+**Store methods added:** `setPlanDate`, `setShortlist`, `recordVote`, `saveNegotiation` / `getNegotiation` / `clearNegotiation`, `removeParticipant`, `addFavorite`.
+
+**Still yours, in priority order:**
+
+1. `removeParticipant` is built but not called — a non-host who leaves still blocks `go` forever
+2. `fanOut` sending a real poll instead of the numbered text
+3. The process-local `spaces` map, so fan-out survives a restart
+4. `parseLeave` vocabulary: `cancel`, `stop`, `quit`, `never mind`
+
 ### What A needs from B
 
 **Nothing is outstanding.** `getPlanByJoinCode` and the rest of the plan CRUD are built and covered by assertions, so nothing needs stubbing.
