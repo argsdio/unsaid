@@ -1302,7 +1302,14 @@ async function main(): Promise<void> {
     const space = (p: string) => ({
       id: `dm-${p}`, type: "dm" as const, phone: p,
       async responding(f: () => Promise<void>) { await f(); },
-      async send(c: unknown) { inbox[p]!.push(typeof c === "string" ? c : "[poll]"); },
+      // Spectrum's builders are lazy -- poll() and richlink() return { build() }
+      // and the content only exists once Spectrum awaits it -- so building here
+      // is the difference between asserting on content and asserting on "[poll]".
+      async send(c: unknown) {
+        if (typeof c === "string") { inbox[p]!.push(c); return; }
+        const built = (await (c as { build?: () => Promise<unknown> }).build?.()) ?? c;
+        inbox[p]!.push(JSON.stringify(built));
+      },
     });
     const inbound = (p: string, t: string) => ({
       direction: "inbound" as const,
@@ -1342,7 +1349,9 @@ async function main(): Promise<void> {
       shortlist: afterAnswer.shortlist ?? [],
       settled: plan.status,
       chosen: plan.chosen,
-      card: inbox[B]!.at(-1) ?? "",
+      // Not the last message: a richlink follows the card now.
+      card: inbox[B]!.find((m) => m.startsWith("Settled:")) ?? inbox[B]!.at(-1) ?? "",
+      preview: inbox[B]!.find((m) => m.includes('"richlink"')) ?? "",
       joined: inbox[B]![0] ?? "",
       invite: inbox[A]![0] ?? "",
     };
@@ -1377,6 +1386,11 @@ async function main(): Promise<void> {
     "settling records the pick, which nothing used to write",
     saidYes.settled === "confirmed" && typeof saidYes.chosen?.venueId === "string",
     `${saidYes.settled} · ${saidYes.chosen?.venueId ?? "none"}`,
+  );
+  check(
+    "the settled venue also goes out as a link preview",
+    /"type":"richlink"/.test(saidYes.preview) && /google\.com\/maps/.test(saidYes.preview),
+    saidYes.preview.slice(0, 80),
   );
   check(
     "and the settled card carries a map and transit from where that person is",

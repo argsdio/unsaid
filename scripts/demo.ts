@@ -85,10 +85,10 @@ async function play(script: Script, n: number): Promise<void> {
       // only exists once Spectrum awaits it. Without building it here the demo
       // sees an empty object and shows nothing.
       const built = (await (c as { build?: () => Promise<unknown> }).build?.()) ?? c;
-      const card = built as { type?: string; title?: string; options?: Array<{ title?: string }> };
+      const card = built as { type?: string; title?: string; url?: string; options?: Array<{ title?: string }> };
       inbox[p]!.push(
         [
-          `[native iMessage ${card.type ?? "card"}] ${card.title ?? ""}`,
+          `[native iMessage ${card.type ?? "card"}] ${card.title ?? card.url ?? ""}`,
           ...(card.options ?? []).map((o, i) => `   ${i + 1}. ${o.title ?? ""}`),
         ].join("\n"),
       );
