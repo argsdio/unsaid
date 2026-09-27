@@ -1,8 +1,9 @@
 import type { Message, Space } from "spectrum-ts";
 import type { HandleDMResult } from "./contracts.ts";
+import type { PlanDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
-import { fanOut, type SpaceLookup } from "./orchestrator/fanout.ts";
-import { runNegotiation } from "./orchestrator/negotiate.ts";
+import { fanOut, sendTo, type SpaceLookup } from "./orchestrator/fanout.ts";
+import { type NegotiateOutcome, resumeAfterWhisper, runNegotiation } from "./orchestrator/negotiate.ts";
 import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
 import {
   abandonPlan,
@@ -127,7 +128,33 @@ async function onGo(
   await store.setStatus(plan._id, "negotiating");
   const outcome = await runNegotiation(store, plan);
 
+  await deliverOutcome(outcome, store, plan, lookup, userId, space);
+}
+
+// Shared by `go` and by an answer to a private question, so a resumed
+// negotiation behaves exactly like a fresh one.
+async function deliverOutcome(
+  outcome: NegotiateOutcome,
+  store: Store,
+  plan: PlanDoc,
+  lookup: SpaceLookup,
+  userId: string,
+  space: Space,
+): Promise<void> {
   if (!outcome.ok) {
+    if ("ask" in outcome) {
+      // Paused, not failed. The plan stays `negotiating`, and the question goes to
+      // the one person who could move -- usually not whoever sent `go`.
+      const pausedPlan = (await store.getPlan(plan._id)) ?? plan;
+      await sendTo(lookup, spacesFor(pausedPlan), outcome.ask.userId, outcome.ask.question, {
+        userId,
+        space,
+      });
+      if (outcome.ask.userId !== userId) {
+        await send(space, "Checking one thing with someone. Back shortly.", "go: paused on a whisper");
+      }
+      return;
+    }
     await store.setStatus(plan._id, "collecting");
     await send(space, outcome.text, "go: negotiation failed (see go: logs above)");
     return;
@@ -137,7 +164,7 @@ async function onGo(
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
   const result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
-  console.log("go", { planId: plan._id, ...result });
+  console.log("go", { planId: plan._id, shortlist: outcome.shortlist, ...result });
   if (result.failed > 0 && result.sent > 0) {
     await send(
       space,
@@ -256,6 +283,17 @@ export async function onDirectText(
   }
 
   rememberSpace(current._id, userId, tracked);
+
+  // Answering their own agent's private question, not filling a slot. This must
+  // come before handleDM or the answer is swallowed and the plan hangs forever.
+  const paused = await store.getNegotiation(current._id);
+  if (paused?.pendingAsk?.userId === userId) {
+    botLog("whisper answer", { userId, planId: current._id, text });
+    const resumed = await resumeAfterWhisper(store, current, text);
+    await deliverOutcome(resumed, store, current, lookup, userId, space);
+    return;
+  }
+
   const nextAsk = missingSlots(await store.getSlots(current._id, userId))[0];
   const forSlots = rewriteNessieAnswer(userId, text, nextAsk);
   botLog("handleDM inbound", { userId, planId: current._id, text: forSlots });

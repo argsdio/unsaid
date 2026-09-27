@@ -139,8 +139,41 @@ export type Position = {
 // the backroom screen without conversion.
 // `merged` is returned so the caller can pick a time for the plan card without
 // recomputing it -- and it is the relaxed version, after any concessions.
+// A paused negotiation, persisted so it survives both the minutes a person takes
+// to answer their agent and a process restart.
+export type SavedNegotiation = {
+  planId: string;
+  round: number;
+  // Relaxations agreed so far, per person. B-internal -- the orchestrator only
+  // ever sees the merged result.
+  relaxations: Record<string, { budget?: number; travel?: number }>;
+  // Anyone already asked privately, regardless of their answer. Asking once is
+  // advocacy; asking the same person three times with an escalating number is
+  // pressure, which is the thing the sensitivity flag exists to prevent.
+  asked: string[];
+  // Carries the exact relaxation being asked about, so agreeing applies the same
+  // number the person was shown.
+  pendingAsk?: {
+    userId: string;
+    question: string;
+    kind: "budget" | "travel";
+    newValue: number;
+  };
+};
+
 export type NegotiationResult =
-  | { status: "settled"; venueId: string; merged: MergedConstraints; rounds: RoundLog[] }
+  // `shortlist` is up to three venues, best first. One option is a decision
+  // handed down; three is a choice, which gives somebody who disagrees with the
+  // top pick something to do about it.
+  | { status: "settled"; shortlist: string[]; merged: MergedConstraints; rounds: RoundLog[] }
+  // Paused: one person's agent is asking them privately whether they can flex.
+  | {
+      status: "waiting";
+      userId: string;
+      question: string;
+      merged: MergedConstraints;
+      rounds: RoundLog[];
+    }
   | {
       status: "failed";
       reason: "no-overlap" | "deadlock" | "round-cap";

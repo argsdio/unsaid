@@ -15,6 +15,32 @@ async function openStored(lookup: SpaceLookup, ref: SpaceRef): Promise<Space | n
   }
 }
 
+// One participant, not everyone. The flex whisper goes to the person who could
+// move, who is usually not whoever sent `go`.
+export async function sendTo(
+  lookup: SpaceLookup,
+  stored: Record<string, SpaceRef>,
+  userId: string,
+  text: string,
+  fromGo: { userId: string; space: Space },
+): Promise<boolean> {
+  const ref = stored[userId];
+  const dest = userId === fromGo.userId ? fromGo.space : ref ? await openStored(lookup, ref) : null;
+  if (!dest) {
+    console.error("no space for participant", userId);
+    return false;
+  }
+  try {
+    await dest.responding(async () => {
+      await dest.send(text);
+    });
+    return true;
+  } catch (err) {
+    console.error("whisper send failed", userId, err);
+    return false;
+  }
+}
+
 export async function fanOut(
   lookup: SpaceLookup,
   plan: PlanDoc,

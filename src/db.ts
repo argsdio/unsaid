@@ -1,5 +1,13 @@
 import { type Collection, MongoClient } from "mongodb";
-import type { PlanDoc, PlanStatus, RoundLog, Slots, StoredMessage, UserDoc } from "./contracts.ts";
+import type {
+  PlanDoc,
+  PlanStatus,
+  RoundLog,
+  SavedNegotiation,
+  Slots,
+  StoredMessage,
+  UserDoc,
+} from "./contracts.ts";
 
 // A join code only resolves while the plan is live, so codes become reusable
 // across demo re-runs and a stale code cannot pull someone into a finished plan.
@@ -40,6 +48,12 @@ export type Store = {
   appendRound(round: RoundLog): Promise<void>;
   listRounds(planId: string): Promise<RoundLog[]>;
 
+  // A negotiation paused on a human. Persisted rather than held in memory so it
+  // survives both the minutes someone takes to reply and a process restart.
+  saveNegotiation(state: SavedNegotiation): Promise<void>;
+  getNegotiation(planId: string): Promise<SavedNegotiation | null>;
+  clearNegotiation(planId: string): Promise<void>;
+
   close(): Promise<void>;
 };
 
@@ -54,6 +68,7 @@ function memoryStore(): Store {
   const users = new Map<string, UserDoc>();
   const rounds: RoundLog[] = [];
   const messages = new Map<string, StoredMessage[]>();
+  const negotiations = new Map<string, SavedNegotiation>();
 
   function findByCode(code: string): PlanDoc | null {
     if (!code.trim()) return null;
@@ -98,6 +113,7 @@ function memoryStore(): Store {
       for (const key of [...messages.keys()]) {
         if (key.startsWith(`${planId}:`)) messages.delete(key);
       }
+      negotiations.delete(planId);
     },
     async deleteUser(userId) {
       users.delete(userId);
@@ -169,6 +185,15 @@ function memoryStore(): Store {
     async listRounds(planId) {
       return rounds.filter((r) => r.planId === planId).sort((a, b) => a.round - b.round);
     },
+    async saveNegotiation(state) {
+      negotiations.set(state.planId, state);
+    },
+    async getNegotiation(planId) {
+      return negotiations.get(planId) ?? null;
+    },
+    async clearNegotiation(planId) {
+      negotiations.delete(planId);
+    },
     async close() {},
   };
 }
@@ -191,6 +216,7 @@ async function mongoStore(uri: string): Promise<Store> {
   const users = db.collection<UserDoc>("users");
   const rounds = db.collection<RoundLog>("rounds");
   const messages = db.collection<StoredMessage & { planId: string; userId: string }>("messages");
+  const negotiations = db.collection<SavedNegotiation>("negotiations");
 
   async function findByCode(code: string): Promise<PlanDoc | null> {
     if (!code.trim()) return null;
@@ -236,6 +262,7 @@ async function mongoStore(uri: string): Promise<Store> {
         plans.deleteOne({ _id: planId }),
         rounds.deleteMany({ planId }),
         messages.deleteMany({ planId }),
+        negotiations.deleteMany({ planId }),
       ]);
     },
     async deleteUser(userId) {
@@ -308,6 +335,15 @@ async function mongoStore(uri: string): Promise<Store> {
     },
     async listRounds(planId) {
       return rounds.find({ planId }).sort({ round: 1 }).toArray();
+    },
+    async saveNegotiation(state) {
+      await negotiations.replaceOne({ planId: state.planId }, state, { upsert: true });
+    },
+    async getNegotiation(planId) {
+      return negotiations.findOne({ planId });
+    },
+    async clearNegotiation(planId) {
+      await negotiations.deleteOne({ planId });
     },
     async close() {
       await client.close();

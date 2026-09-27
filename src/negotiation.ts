@@ -11,6 +11,7 @@ import type {
 } from "./contracts.ts";
 import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "./aggregator.ts";
 import { scoreCandidates } from "./agent/score.ts";
+import type { SavedNegotiation } from "./contracts.ts";
 import type { Store } from "./db.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
 
@@ -235,30 +236,117 @@ async function positionsFor(agents: Agent[], survivors: Survivor[]): Promise<Pos
   );
 }
 
-function unanimous(survivors: Survivor[], positions: Position[][]): string | undefined {
-  return survivors.find((s) =>
-    positions.every((list) => list.find((p) => p.venueId === s.venueId)?.move === "accept"),
-  )?.venueId;
-}
+const SHORTLIST = 3;
 
-function bestWorstCase(survivors: Survivor[], positions: Position[][]): string | undefined {
+// Best worst-case first, tiebroken by the shorter longest commute. Returns up to
+// three: one option is a decision handed down, three is a choice.
+function rank(survivors: Survivor[], positions: Position[][], limit: number): string[] {
   const travel = new Map(survivors.map((s) => [s.venueId, s.longestTravelMin]));
-  const ranked = survivors
+  return survivors
     .map((s) => ({
       venueId: s.venueId,
       worst: Math.min(...positions.map((l) => l.find((p) => p.venueId === s.venueId)?.score ?? 0)),
     }))
     .sort(
-      (a, b) =>
-        b.worst - a.worst || (travel.get(a.venueId) ?? 0) - (travel.get(b.venueId) ?? 0),
+      (a, b) => b.worst - a.worst || (travel.get(a.venueId) ?? 0) - (travel.get(b.venueId) ?? 0),
+    )
+    .slice(0, limit)
+    .map((x) => x.venueId);
+}
+
+function acceptedByAll(survivors: Survivor[], positions: Position[][]): Survivor[] {
+  return survivors.filter((s) =>
+    positions.every((list) => list.find((p) => p.venueId === s.venueId)?.move === "accept"),
+  );
+}
+
+// Layer 4. Somebody who hedged about a constraint is the only one who could help.
+// They are never silently conceded on their behalf -- they get asked, privately,
+// once, with an easy way to decline.
+function whisperCandidate(
+  agents: Agent[],
+  day: Date,
+  baseline: number,
+  asked: string[],
+): { userId: string; kind: "budget" | "travel"; newValue: number; question: string } | null {
+  for (const kind of ["budget", "travel"] as const) {
+    const slot = kind === "budget" ? "budgetCapUSD" : "maxTravelMin";
+    const tightest = Math.min(...agents.map((a) => cap(a, slot) ?? Infinity));
+    if (!Number.isFinite(tightest)) continue;
+
+    const step = kind === "budget" ? BUDGET_STEP : TRAVEL_STEP;
+    const candidates = agents.filter(
+      (a) =>
+        (cap(a, slot) ?? Infinity) === tightest &&
+        a.sensitive.includes(slot) &&
+        !asked.includes(a.userId),
     );
-  return ranked[0]?.venueId;
+
+    for (const candidate of candidates) {
+      const relaxed = agents.map((a) =>
+        a.userId === candidate.userId ? flex(a, slot, tightest + step) : a,
+      );
+      if (survivorCount(relaxed, day) - baseline < 0) continue;
+      const newValue = tightest + step;
+      const question =
+        kind === "budget"
+          ? `Everything that works for the group is a bit over $${tightest}. Could you do $${newValue}? Completely fine to say no — I'll find something else.`
+          : `The options that work are a bit further out — about ${newValue} min instead of ${tightest}. Okay? Completely fine to say no.`;
+      return { userId: candidate.userId, kind, newValue, question };
+    }
+  }
+  return null;
+}
+
+// yes / no, with null for anything we cannot read -- treated as a no, since
+// pushing someone who did not clearly agree is the thing to avoid.
+export function parseAgreement(text: string): boolean | null {
+  const t = text.trim().toLowerCase();
+  if (/^(y|ya|yes|yeah|yep|yup|ok|okay|sure|fine|works|deal|go ahead|do it|thats fine|that works|i can|can do)\b/.test(t)) {
+    return true;
+  }
+  if (/^(n|no|nope|nah|cant|can not|cannot|sorry|rather not|id rather not|too much|not really)\b/.test(t)) {
+    return false;
+  }
+  return null;
+}
+
+type Relaxations = Record<string, { budget?: number; travel?: number }>;
+
+async function loadAgents(
+  store: Store,
+  people: Participant[],
+  relaxations: Relaxations,
+): Promise<Agent[]> {
+  return Promise.all(
+    people.map(async (participant) => {
+      const user = await store.getUser(participant.userId);
+      const applied = relaxations[participant.userId];
+      let slots = participant.slots;
+      if (applied?.budget !== undefined) {
+        slots = { ...slots, budgetCapUSD: { raw: "(flexed)", value: applied.budget, confidence: "low" } };
+      }
+      if (applied?.travel !== undefined) {
+        slots = { ...slots, maxTravelMin: { raw: "(flexed)", value: applied.travel, confidence: "low" } };
+      }
+      return {
+        userId: participant.userId,
+        participant: { ...participant, slots },
+        tastes: user?.profile.tastes ?? [],
+        preferredSpots: user?.profile.preferredSpots ?? [],
+        sensitive: participant.slots.sensitive ?? [],
+      };
+    }),
+  );
 }
 
 /**
- * Contract 12, layers 1-3: personas hold positions across rounds, the binding
- * constraint is named without attribution, and each agent decides its own
- * movement. Synchronous -- layer 4 (asking a human mid-round) is not built.
+ * Contract 12. Rounds, unattributed objections, agents that decide their own
+ * movement (layers 1-3), and a private ask when the only person who could help
+ * is the one who sounded uncomfortable (layer 4).
+ *
+ * Resumes automatically from a saved pause, so the caller does not need to know
+ * whether this is a fresh run or a continuation.
  */
 export async function negotiate(
   store: Store,
@@ -266,93 +354,168 @@ export async function negotiate(
   people: Participant[],
   day: Date = new Date(),
 ): Promise<NegotiationResult> {
-  let agents: Agent[] = await Promise.all(
-    people.map(async (participant) => {
-      const user = await store.getUser(participant.userId);
-      return {
-        userId: participant.userId,
-        participant,
-        tastes: user?.profile.tastes ?? [],
-        preferredSpots: user?.profile.preferredSpots ?? [],
-        sensitive: participant.slots.sensitive ?? [],
-      };
-    }),
-  );
+  const saved = await store.getNegotiation(planId);
+  const relaxations: Relaxations = { ...(saved?.relaxations ?? {}) };
+  const askedAlready = [...(saved?.asked ?? [])];
+  let agents = await loadAgents(store, people, relaxations);
 
   const rounds: RoundLog[] = [];
   let lastObjection: Objection | null = null;
 
-  for (let round = 1; round <= MAX_ROUNDS; round++) {
-    const merged = mergeConstraints(agents.map((a) => a.participant), day);
+  const done = async <T extends NegotiationResult>(result: T): Promise<T> => {
+    await store.clearNegotiation(planId);
+    return result;
+  };
+
+  for (let round = saved?.round ?? 1; round <= MAX_ROUNDS; round++) {
+    const parts = agents.map((a) => a.participant);
+    const merged = mergeConstraints(parts, day);
     if (!hasOverlap(merged.window)) {
-      return { status: "failed", reason: "no-overlap", binding: null, merged, rounds };
+      return done({ status: "failed", reason: "no-overlap", binding: null, merged, rounds });
     }
 
-    const filtered = filterVenues(
-      VENUES,
-      merged,
-      travelProfiles(agents.map((a) => a.participant)),
-    );
+    const filtered = filterVenues(VENUES, merged, travelProfiles(parts));
     const ranked = rankedObjections(filtered.rejected, merged);
     const objection = ranked[0] ?? null;
     lastObjection = objection;
 
     const positions =
       filtered.survivors.length > 0 ? await positionsFor(agents, filtered.survivors) : [];
-    const settledOn =
-      filtered.survivors.length > 0 ? unanimous(filtered.survivors, positions) : undefined;
+    const accepted =
+      filtered.survivors.length > 0 ? acceptedByAll(filtered.survivors, positions) : [];
 
-    if (settledOn) {
+    if (accepted.length > 0) {
+      const shortlist = rank(accepted, positions, SHORTLIST);
       rounds.push(
         toRoundLog(
           planId, round, filtered.survivors, filtered.rejected, positions, [], [],
-          narrate(round, filtered.survivors.length, settledOn, objection, []),
-          settledOn,
+          narrate(round, filtered.survivors.length, shortlist[0], objection, []),
+          shortlist[0],
         ),
       );
-      return { status: "settled", venueId: settledOn, merged, rounds };
+      return done({ status: "settled", shortlist, merged, rounds });
     }
 
-    // Nobody agreed. Find the relaxation that would actually admit more venues,
-    // from someone who did not hedge about that constraint.
+    // Somebody willing? Take the relaxation that admits the most venues.
     const relaxation = bestRelaxation(agents, day, filtered.survivors.length);
-    const concessions = relaxation?.concessions ?? [];
-    const asked: Objection | null = relaxation
-      ? relaxation.kind === "budget"
-        ? { kind: "budget", cap: merged.budgetCapUSD }
-        : { kind: "travel", maxMin: 0 }
-      : objection;
-    if (relaxation) agents = relaxation.agents;
+    if (relaxation) {
+      agents = relaxation.agents;
+      for (const a of agents) {
+        const budget = cap(a, "budgetCapUSD");
+        const travel = cap(a, "maxTravelMin");
+        const before = relaxations[a.userId] ?? {};
+        const originalBudget = people.find((p) => p.userId === a.userId)?.slots.budgetCapUSD?.value;
+        const originalTravel = people.find((p) => p.userId === a.userId)?.slots.maxTravelMin?.value;
+        if (budget !== null && budget !== originalBudget) before.budget = budget;
+        if (travel !== null && travel !== originalTravel) before.travel = travel;
+        if (Object.keys(before).length > 0) relaxations[a.userId] = before;
+      }
+      const asked: Objection =
+        relaxation.kind === "budget"
+          ? { kind: "budget", cap: merged.budgetCapUSD }
+          : { kind: "travel", maxMin: 0 };
+      rounds.push(
+        toRoundLog(
+          planId, round, filtered.survivors, filtered.rejected, positions,
+          shuffle(objection ? [objection] : []), relaxation.concessions,
+          narrate(round, filtered.survivors.length, undefined, asked, relaxation.concessions),
+        ),
+      );
+      continue;
+    }
+
+    // Nobody willing. If the only person who could help hedged about it, ask them
+    // privately rather than either pushing them silently or giving up.
+    const whisper = whisperCandidate(agents, day, filtered.survivors.length, askedAlready);
+    if (whisper) {
+      rounds.push(
+        toRoundLog(
+          planId, round, filtered.survivors, filtered.rejected, positions,
+          shuffle(objection ? [objection] : []), [],
+          `${narrate(round, filtered.survivors.length, undefined, objection, [])} Checking privately with the one person who could move.`,
+        ),
+      );
+      await store.saveNegotiation({
+        planId,
+        round,
+        relaxations,
+        asked: askedAlready,
+        pendingAsk: {
+          userId: whisper.userId,
+          question: whisper.question,
+          kind: whisper.kind,
+          newValue: whisper.newValue,
+        },
+      });
+      return { status: "waiting", userId: whisper.userId, question: whisper.question, merged, rounds };
+    }
 
     rounds.push(
       toRoundLog(
         planId, round, filtered.survivors, filtered.rejected, positions,
-        shuffle(objection ? [objection] : []), concessions,
-        narrate(round, filtered.survivors.length, undefined, asked ?? objection, concessions),
+        shuffle(objection ? [objection] : []), [],
+        narrate(round, filtered.survivors.length, undefined, objection, []),
       ),
     );
 
-    // Nobody willing or able to move, and no agreement: further rounds are identical.
-    if (concessions.length === 0) {
-      if (filtered.survivors.length > 0) {
-        const fallback = bestWorstCase(filtered.survivors, positions);
-        if (fallback) return { status: "settled", venueId: fallback, merged, rounds };
-      }
-      return { status: "failed", reason: "deadlock", binding: objection, merged, rounds };
+    if (filtered.survivors.length > 0) {
+      const shortlist = rank(filtered.survivors, positions, SHORTLIST);
+      return done({ status: "settled", shortlist, merged, rounds });
     }
+    return done({ status: "failed", reason: "deadlock", binding: objection, merged, rounds });
   }
 
-  // Round cap. Fall back to the least-bad option rather than failing outright.
-  const finalMerged = mergeConstraints(agents.map((a) => a.participant), day);
-  const filtered = filterVenues(
-    VENUES,
-    finalMerged,
-    travelProfiles(agents.map((a) => a.participant)),
-  );
+  const parts = agents.map((a) => a.participant);
+  const finalMerged = mergeConstraints(parts, day);
+  const filtered = filterVenues(VENUES, finalMerged, travelProfiles(parts));
   if (filtered.survivors.length > 0) {
     const positions = await positionsFor(agents, filtered.survivors);
-    const fallback = bestWorstCase(filtered.survivors, positions);
-    if (fallback) return { status: "settled", venueId: fallback, merged: finalMerged, rounds };
+    const shortlist = rank(filtered.survivors, positions, SHORTLIST);
+    return done({ status: "settled", shortlist, merged: finalMerged, rounds });
   }
-  return { status: "failed", reason: "round-cap", binding: lastObjection, merged: finalMerged, rounds };
+  return done({
+    status: "failed",
+    reason: "round-cap",
+    binding: lastObjection,
+    merged: finalMerged,
+    rounds,
+  });
+}
+
+/**
+ * The other half of layer 4: a person answered their agent's private question.
+ * Agreement applies exactly the number they were shown; anything else is treated
+ * as a no and they are never asked again this plan.
+ */
+export async function resumeNegotiation(
+  store: Store,
+  planId: string,
+  people: Participant[],
+  text: string,
+  day: Date = new Date(),
+): Promise<NegotiationResult> {
+  const saved = await store.getNegotiation(planId);
+  if (!saved?.pendingAsk) return negotiate(store, planId, people, day);
+
+  const { userId, kind, newValue } = saved.pendingAsk;
+  const agreed = parseAgreement(text) === true;
+
+  await store.saveNegotiation({
+    planId,
+    round: saved.round + 1,
+    relaxations: agreed
+      ? {
+          ...saved.relaxations,
+          [userId]: {
+            ...(saved.relaxations[userId] ?? {}),
+            ...(kind === "budget" ? { budget: newValue } : { travel: newValue }),
+          },
+        }
+      : saved.relaxations,
+    // Recorded either way: one private ask per person per plan.
+    asked: [...saved.asked, userId],
+    pendingAsk: undefined,
+  });
+
+  return negotiate(store, planId, people, day);
 }

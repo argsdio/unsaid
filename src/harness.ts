@@ -14,7 +14,7 @@ import { VENUES, filterVenues, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
-import { negotiate } from "./negotiation.ts";
+import { negotiate, parseAgreement, resumeNegotiation } from "./negotiation.ts";
 import { isSensitive } from "./resolve/sensitivity.ts";
 
 type FakeUser = {
@@ -458,12 +458,65 @@ async function main(): Promise<void> {
     ["s1", { homeRaw: "east village", budgetRaw: "$9 max", dietaryRaw: "vegan", windowRaw: "after 7", travelRaw: "10 min tops" }],
     ["s2", { homeRaw: "flushing", budgetRaw: "$10 tops", dietaryRaw: "halal", windowRaw: "after 7", travelRaw: "10 min max" }],
   ]);
+  // Layer 4. When the only person who could help is the one who hedged, they get
+  // asked privately -- once -- rather than pushed silently or given up on.
   const stuckRun = await negotiate(negStore, "neg-s", stuck, day);
+  check("nobody willing means somebody gets asked privately", stuckRun.status === "waiting");
   check(
-    "nobody willing to move deadlocks honestly rather than looping",
-    stuckRun.status === "failed" && stuckRun.reason === "deadlock",
+    "the question offers an easy way out",
+    stuckRun.status === "waiting" && /fine to say no/i.test(stuckRun.question),
   );
-  check("and it names what the sticking point was", stuckRun.status === "failed" && stuckRun.binding !== null);
+  const pausedState = await negStore.getNegotiation("neg-s");
+  check(
+    "the pause is persisted with the exact number offered",
+    typeof pausedState?.pendingAsk?.newValue === "number" && pausedState.round >= 1,
+  );
+
+  // Follow both chains to termination, tracking who gets asked.
+  const chase = async (planId: string, people: Participant[], answer: string) => {
+    let r = await negotiate(negStore, planId, people, day);
+    const askedOf: string[] = [];
+    for (let i = 0; r.status === "waiting" && i < 8; i++) {
+      askedOf.push(r.userId);
+      r = await resumeNegotiation(negStore, planId, people, answer, day);
+    }
+    return { result: r, askedOf };
+  };
+
+  const declined = await chase("neg-no", stuck, "sorry, cant");
+  check(
+    "everyone declining ends in an honest deadlock",
+    declined.result.status === "failed" && declined.result.reason === "deadlock",
+  );
+  check(
+    "and nobody is asked twice, however much it would help",
+    new Set(declined.askedOf).size === declined.askedOf.length && declined.askedOf.length > 0,
+  );
+
+  // A group whose only wall is money, so agreeing can actually help. `stuck`
+  // cannot be rescued by any answer: it needs both vegan and halal, and dietary
+  // never bends.
+  const whisperable = await asPeople([
+    ["y1", { homeRaw: "east village", budgetRaw: "$8 tops, kinda broke rn", dietaryRaw: "vegetarian", windowRaw: "after 7", travelRaw: "20 min max" }],
+    ["y2", { homeRaw: "west village", budgetRaw: "$50", dietaryRaw: "i eat everything", windowRaw: "after 7", travelRaw: "20 min max" }],
+  ]);
+  const agreedRun = await chase("neg-yes", whisperable, "yeah ok");
+  check("somebody agreeing reaches an answer", agreedRun.result.status === "settled");
+  check(
+    "the paused state is cleared once it finishes",
+    (await negStore.getNegotiation("neg-yes")) === null,
+  );
+  check(
+    "a settled plan offers up to three options, not one",
+    agreedRun.result.status === "settled" &&
+      agreedRun.result.shortlist.length >= 1 &&
+      agreedRun.result.shortlist.length <= 3,
+    agreedRun.result.status === "settled" ? `(${agreedRun.result.shortlist.length})` : "",
+  );
+  check(
+    "yes and no are both read correctly",
+    parseAgreement("yeah ok") === true && parseAgreement("sorry, cant") === false && parseAgreement("hmm") === null,
+  );
 
   const easy = await asPeople([
     ["e1", { homeRaw: "east village", budgetRaw: "$14", dietaryRaw: "vegetarian", windowRaw: "after 7", travelRaw: "30 min" }],
@@ -471,6 +524,10 @@ async function main(): Promise<void> {
   ]);
   const easyRun = await negotiate(negStore, "neg-e", easy, day);
   check("a workable group settles", easyRun.status === "settled");
+  check(
+    "and its shortlist is capped at three",
+    easyRun.status === "settled" && easyRun.shortlist.length <= 3,
+  );
   check("rounds are capped at three", easyRun.rounds.length <= 3, `(${easyRun.rounds.length})`);
   check(
     "every round explains itself",
