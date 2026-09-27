@@ -1,39 +1,85 @@
-import { MongoClient } from "mongodb";
-import type { RoundLog, Slots, UserDoc } from "./contracts.ts";
+import { type Collection, MongoClient } from "mongodb";
+import type { PlanDoc, PlanStatus, RoundLog, Slots, UserDoc } from "./contracts.ts";
+
+// A join code only resolves while the plan is live, so codes become reusable
+// across demo re-runs and a stale code cannot pull someone into a finished plan.
+const ACTIVE: PlanStatus[] = ["collecting", "negotiating", "proposed"];
 
 export type Store = {
+  // Plans. A owns joinCode, participants and status; B owns slots.
+  createPlan(plan: PlanDoc): Promise<boolean>;
+  getPlan(planId: string): Promise<PlanDoc | null>;
+  getPlanByJoinCode(code: string): Promise<PlanDoc | null>;
+  addParticipant(planId: string, userId: string): Promise<void>;
+  setStatus(planId: string, status: PlanStatus): Promise<void>;
+
   getSlots(planId: string, userId: string): Promise<Slots>;
   getAllSlots(planId: string): Promise<Record<string, Slots>>;
   setSlots(planId: string, userId: string, slots: Slots): Promise<void>;
+
   getUser(userId: string): Promise<UserDoc | null>;
   upsertUser(user: UserDoc): Promise<void>;
+
   appendRound(round: RoundLog): Promise<void>;
   listRounds(planId: string): Promise<RoundLog[]>;
+
   close(): Promise<void>;
 };
 
+function blankPlan(planId: string): PlanDoc {
+  return { _id: planId, joinCode: "", participants: [], status: "collecting", slots: {} };
+}
+
 // Without MONGODB_URI everything runs in memory, so the harness and the backroom
-// screen do not wait on an Atlas cluster.
+// screen do not wait on an Atlas cluster. State does not survive a restart.
 function memoryStore(): Store {
-  const slots = new Map<string, Slots>();
+  const plans = new Map<string, PlanDoc>();
   const users = new Map<string, UserDoc>();
   const rounds: RoundLog[] = [];
-  const key = (planId: string, userId: string) => `${planId}:${userId}`;
+
+  function findByCode(code: string): PlanDoc | null {
+    if (!code.trim()) return null;
+    for (const plan of plans.values()) {
+      if (plan.joinCode === code && ACTIVE.includes(plan.status)) return plan;
+    }
+    return null;
+  }
+
+  function ensure(planId: string): PlanDoc {
+    const existing = plans.get(planId);
+    if (existing) return existing;
+    const fresh = blankPlan(planId);
+    plans.set(planId, fresh);
+    return fresh;
+  }
 
   return {
+    async createPlan(plan) {
+      if (plans.has(plan._id) || findByCode(plan.joinCode)) return false;
+      plans.set(plan._id, { ...plan });
+      return true;
+    },
+    async getPlan(planId) {
+      return plans.get(planId) ?? null;
+    },
+    async getPlanByJoinCode(code) {
+      return findByCode(code);
+    },
+    async addParticipant(planId, userId) {
+      const plan = ensure(planId);
+      if (!plan.participants.includes(userId)) plan.participants.push(userId);
+    },
+    async setStatus(planId, status) {
+      ensure(planId).status = status;
+    },
     async getSlots(planId, userId) {
-      return slots.get(key(planId, userId)) ?? {};
+      return plans.get(planId)?.slots[userId] ?? {};
     },
     async getAllSlots(planId) {
-      const out: Record<string, Slots> = {};
-      for (const [k, v] of slots) {
-        const [plan, user] = k.split(":");
-        if (plan === planId && user) out[user] = v;
-      }
-      return out;
+      return plans.get(planId)?.slots ?? {};
     },
     async setSlots(planId, userId, value) {
-      slots.set(key(planId, userId), value);
+      ensure(planId).slots[userId] = value;
     },
     async getUser(userId) {
       return users.get(userId) ?? null;
@@ -55,23 +101,54 @@ async function mongoStore(uri: string): Promise<Store> {
   const client = new MongoClient(uri);
   await client.connect();
   const db = client.db(process.env.MONGODB_DB ?? "unsaid");
-  const plans = db.collection("plans");
+  const plans: Collection<PlanDoc> = db.collection<PlanDoc>("plans");
   const users = db.collection<UserDoc>("users");
   const rounds = db.collection<RoundLog>("rounds");
 
+  async function findByCode(code: string): Promise<PlanDoc | null> {
+    if (!code.trim()) return null;
+    return plans.findOne({ joinCode: code, status: { $in: ACTIVE } });
+  }
+
   return {
+    async createPlan(plan) {
+      if (await findByCode(plan.joinCode)) return false;
+      try {
+        await plans.insertOne(plan);
+        return true;
+      } catch {
+        // Duplicate _id: the plan already exists.
+        return false;
+      }
+    },
+    async getPlan(planId) {
+      return plans.findOne({ _id: planId });
+    },
+    async getPlanByJoinCode(code) {
+      return findByCode(code);
+    },
+    async addParticipant(planId, userId) {
+      await plans.updateOne(
+        { _id: planId },
+        { $addToSet: { participants: userId }, $setOnInsert: blankPlan(planId) },
+        { upsert: true },
+      );
+    },
+    async setStatus(planId, status) {
+      await plans.updateOne({ _id: planId }, { $set: { status } }, { upsert: true });
+    },
     async getSlots(planId, userId) {
-      const plan = await plans.findOne({ _id: planId as never });
-      return ((plan?.slots as Record<string, Slots> | undefined) ?? {})[userId] ?? {};
+      const plan = await plans.findOne({ _id: planId });
+      return plan?.slots?.[userId] ?? {};
     },
     async getAllSlots(planId) {
-      const plan = await plans.findOne({ _id: planId as never });
-      return (plan?.slots as Record<string, Slots> | undefined) ?? {};
+      const plan = await plans.findOne({ _id: planId });
+      return plan?.slots ?? {};
     },
     // Touches only this user's key, so A's writes to participants and status survive.
     async setSlots(planId, userId, value) {
       await plans.updateOne(
-        { _id: planId as never },
+        { _id: planId },
         { $set: { [`slots.${userId}`]: value } },
         { upsert: true },
       );

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { Candidate, Evaluation, MergedConstraints } from "./contracts.ts";
+import type { Candidate, Evaluation, MergedConstraints, PlanDoc } from "./contracts.ts";
 import { MERGED_KEYS } from "./contracts.ts";
 import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "./aggregator.ts";
 import { type RawSlots, resolveBudget, resolveDietary, resolveHome, resolveSlots } from "./resolve/index.ts";
@@ -219,6 +219,48 @@ async function main(): Promise<void> {
 
   check("'cheap' resolves to a number", typeof resolveBudget("cheap").value === "number");
   check("'$25 tops' resolves to 25", resolveBudget("$25 tops, kinda broke rn").value === 25);
+
+  // Plan CRUD. A's join flow depends on every one of these.
+  const planStore = await openStore();
+  const plan: PlanDoc = {
+    _id: "plan-1",
+    joinCode: "K7M2",
+    participants: ["maya"],
+    status: "collecting",
+    slots: {},
+  };
+  check("createPlan succeeds on a free code", (await planStore.createPlan(plan)) === true);
+  check("getPlanByJoinCode finds it", (await planStore.getPlanByJoinCode("K7M2"))?._id === "plan-1");
+  check("an unknown code returns null", (await planStore.getPlanByJoinCode("ZZZZ")) === null);
+  check("a blank code never matches", (await planStore.getPlanByJoinCode("")) === null);
+  check(
+    "a taken code is refused",
+    (await planStore.createPlan({ ...plan, _id: "plan-2" })) === false,
+  );
+
+  await planStore.addParticipant("plan-1", "dev");
+  await planStore.addParticipant("plan-1", "dev");
+  check(
+    "addParticipant is idempotent",
+    (await planStore.getPlan("plan-1"))?.participants.join(",") === "maya,dev",
+  );
+
+  await planStore.setSlots("plan-1", "maya", { tags: ["pizza"] });
+  check(
+    "slots round-trip through the plan document",
+    (await planStore.getSlots("plan-1", "maya")).tags?.[0] === "pizza",
+  );
+
+  await planStore.setStatus("plan-1", "confirmed");
+  check(
+    "a confirmed plan stops answering to its code",
+    (await planStore.getPlanByJoinCode("K7M2")) === null,
+  );
+  check(
+    "so the code can be reused by a new plan",
+    (await planStore.createPlan({ ...plan, _id: "plan-3" })) === true,
+  );
+  await planStore.close();
 
   // The backroom screen, checked without binding a port.
   const store = await openStore();
