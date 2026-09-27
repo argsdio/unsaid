@@ -15,6 +15,7 @@ export type RawSlots = {
   windowRaw?: string;
   homeRaw?: string;
   travelRaw?: string;
+  blackoutRaw?: string;
   tags?: string[];
   namedSpots?: string[];
 };

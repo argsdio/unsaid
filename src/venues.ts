@@ -61,3 +61,14 @@ export function filterVenues(
 
   return { survivors, rejected };
 }
+
+// Loose name match so "I love Joe's Pizza" during onboarding becomes a real
+// venue id rather than a free-text taste word.
+export function findVenueByName(text: string): Venue | undefined {
+  const needle = text.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
+  if (needle.length < 3) return undefined;
+  return VENUES.find((v) => {
+    const name = v.name.toLowerCase().replace(/[^a-z0-9 ]/g, "");
+    return needle.includes(name) || name.includes(needle);
+  });
+}

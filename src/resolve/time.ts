@@ -1,4 +1,4 @@
-import type { Slot, TimeWindow } from "../contracts.ts";
+import type { Blackout, Slot, TimeWindow } from "../contracts.ts";
 import { normalise } from "./gazetteer.ts";
 
 // Naive local ISO (no timezone suffix). Everyone is in one room in one city
@@ -71,4 +71,34 @@ export function resolveWindow(raw: string, day: Date = new Date()): Slot<TimeWin
 
 export function eveningWindow(day: Date = new Date()): TimeWindow {
   return { start: iso(day, EVENING_START), end: iso(day, EVENING_END) };
+}
+
+function minutes(hhmm: string): number {
+  const [h, m] = hhmm.split(":").map(Number);
+  return (h ?? 0) * 60 + (m ?? 0);
+}
+
+// Trim a per-plan window against standing blackouts for that weekday. A blackout
+// that swallows the window returns null: that person cannot make it at all.
+// Interior blackouts are ignored rather than splitting the window in two.
+export function clipWindow(
+  window: TimeWindow,
+  blackouts: Blackout[],
+  day: Date = new Date(),
+): TimeWindow | null {
+  const weekday = day.getDay();
+  let start = minutes(window.start.slice(11, 16));
+  let end = minutes(window.end.slice(11, 16));
+
+  for (const blackout of blackouts) {
+    if (!blackout.days.includes(weekday)) continue;
+    const bStart = minutes(blackout.start);
+    const bEnd = minutes(blackout.end);
+    if (bStart <= start && bEnd >= end) return null;
+    if (bStart <= start && bEnd > start) start = bEnd;
+    else if (bEnd >= end && bStart < end) end = bStart;
+  }
+
+  if (start >= end) return null;
+  return { start: iso(day, start), end: iso(day, end) };
 }

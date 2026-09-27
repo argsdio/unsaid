@@ -1,5 +1,5 @@
 import { type Collection, MongoClient } from "mongodb";
-import type { PlanDoc, PlanStatus, RoundLog, Slots, UserDoc } from "./contracts.ts";
+import type { PlanDoc, PlanStatus, RoundLog, Slots, StoredMessage, UserDoc } from "./contracts.ts";
 
 // A join code only resolves while the plan is live, so codes become reusable
 // across demo re-runs and a stale code cannot pull someone into a finished plan.
@@ -16,6 +16,9 @@ export type Store = {
   getSlots(planId: string, userId: string): Promise<Slots>;
   getAllSlots(planId: string): Promise<Record<string, Slots>>;
   setSlots(planId: string, userId: string, slots: Slots): Promise<void>;
+
+  appendMessage(planId: string, userId: string, message: StoredMessage): Promise<void>;
+  listMessages(planId: string, userId: string): Promise<StoredMessage[]>;
 
   getUser(userId: string): Promise<UserDoc | null>;
   upsertUser(user: UserDoc): Promise<void>;
@@ -36,6 +39,7 @@ function memoryStore(): Store {
   const plans = new Map<string, PlanDoc>();
   const users = new Map<string, UserDoc>();
   const rounds: RoundLog[] = [];
+  const messages = new Map<string, StoredMessage[]>();
 
   function findByCode(code: string): PlanDoc | null {
     if (!code.trim()) return null;
@@ -81,6 +85,13 @@ function memoryStore(): Store {
     async setSlots(planId, userId, value) {
       ensure(planId).slots[userId] = value;
     },
+    async appendMessage(planId, userId, message) {
+      const key = `${planId}:${userId}`;
+      messages.set(key, [...(messages.get(key) ?? []), message]);
+    },
+    async listMessages(planId, userId) {
+      return messages.get(`${planId}:${userId}`) ?? [];
+    },
     async getUser(userId) {
       return users.get(userId) ?? null;
     },
@@ -104,6 +115,7 @@ async function mongoStore(uri: string): Promise<Store> {
   const plans: Collection<PlanDoc> = db.collection<PlanDoc>("plans");
   const users = db.collection<UserDoc>("users");
   const rounds = db.collection<RoundLog>("rounds");
+  const messages = db.collection<StoredMessage & { planId: string; userId: string }>("messages");
 
   async function findByCode(code: string): Promise<PlanDoc | null> {
     if (!code.trim()) return null;
@@ -152,6 +164,13 @@ async function mongoStore(uri: string): Promise<Store> {
         { $set: { [`slots.${userId}`]: value } },
         { upsert: true },
       );
+    },
+    async appendMessage(planId, userId, message) {
+      await messages.insertOne({ ...message, planId, userId });
+    },
+    async listMessages(planId, userId) {
+      const rows = await messages.find({ planId, userId }).sort({ at: 1 }).toArray();
+      return rows.map(({ at, direction, text }) => ({ at, direction, text }));
     },
     async getUser(userId) {
       return users.findOne({ _id: userId });

@@ -19,6 +19,18 @@ export type Coords = { lat: number; lng: number };
 export type Home = Coords & { label: string };
 export type TimeWindow = { start: string; end: string };
 
+// Times that never work — class on Tuesday evenings, a shift until 7 on weekdays.
+// Stable across plans, unlike the per-plan availability window. 0 = Sunday.
+export type Blackout = { days: number[]; start: string; end: string };
+
+// One stored DM. Kept per (planId, userId) so extraction can see what was
+// already said, and so the reveal can show a real transcript.
+export type StoredMessage = {
+  at: string;
+  direction: "in" | "out";
+  text: string;
+};
+
 export const DIETARY_TAGS = [
   "vegetarian",
   "vegan",
@@ -137,13 +149,22 @@ export type PlanDoc = {
 export type UserDoc = {
   _id: string;
   phone: string;
+  // Built up across plans during onboarding and as people answer. Budget is
+  // deliberately absent: it depends on the occasion (brunch vs a fancy dinner),
+  // so it is asked every plan. Availability is absent for the same reason —
+  // only the standing impossibilities live here, as `blackouts`.
   profile: {
     home?: Home;
     dietary?: DietaryTag[];
-    defaultBudgetUSD?: number;
+    blackouts?: Blackout[];
     tastes: string[];
     preferredSpots: string[];
   };
+  // Which profile questions have been asked, and when onboarding finished.
+  // Recorded explicitly because an empty answer ("no dietary needs") is
+  // indistinguishable from an unasked one otherwise.
+  askedProfile?: string[];
+  onboardedAt?: string;
   activePlanId?: string;
   wishlist: string[];
 };

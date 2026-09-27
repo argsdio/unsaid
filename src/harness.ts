@@ -6,6 +6,8 @@ import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "
 import { type RawSlots, resolveBudget, resolveDietary, resolveHome, resolveSlots } from "./resolve/index.ts";
 import { scoreCandidates } from "./agent/score.ts";
 import { handleDM } from "./slots.ts";
+import { extractOffline } from "./agent/extract.ts";
+import { resolveBlackouts } from "./resolve/blackout.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
@@ -222,53 +224,71 @@ async function main(): Promise<void> {
   check("'cheap' resolves to a number", typeof resolveBudget("cheap").value === "number");
   check("'$25 tops' resolves to 25", resolveBudget("$25 tops, kinda broke rn").value === 25);
 
-  // handleDM: the function A calls once per inbound message.
+  // handleDM drives onboarding first, then plan slot-filling.
   const dmStore = await openStore({ memory: true });
-  const conversation = [
-    "im in bushwick",
-    "$25 tops",
-    "vegetarian",
-    "after 7",
-    "i dont mind traveling",
-  ];
+  const say = async (userId: string, planId: string, text: string) =>
+    handleDM({ planId, userId, text }, dmStore);
 
-  console.log("\nhandleDM CONVERSATION");
-  let lastMissing: string[] = [];
-  let firstReply = "";
-  for (const [i, text] of conversation.entries()) {
-    const turn = await handleDM({ planId: "plan-dm", userId: "test-maya", text }, dmStore);
-    if (i === 0) firstReply = turn.reply;
-    lastMissing = [...turn.missing];
-    console.log(`  "${text}"`.padEnd(30) + `-> missing ${turn.missing.length}: ${turn.reply}`);
+  console.log("\nONBOARDING A NEW USER");
+  const onboarding = [
+    "dinner friday?",
+    "bushwick",
+    "vegetarian",
+    "class on tuesday nights",
+    "joe's pizza",
+  ];
+  let turn = await say("new-maya", "plan-a", onboarding[0]!);
+  console.log(`  "${onboarding[0]}"`.padEnd(30) + `-> ${turn.reply}`);
+  check("onboarding starts with location, not budget", /where do you usually/i.test(turn.reply));
+  for (const text of onboarding.slice(1)) {
+    turn = await say("new-maya", "plan-a", text);
+    console.log(`  "${text}"`.padEnd(30) + `-> ${turn.reply}`);
   }
 
-  const filled = await dmStore.getSlots("plan-dm", "test-maya");
-  check("first message leaves slots still missing", firstReply.includes("?"));
-  check("location resolved from a DM", filled.home?.value !== null && filled.home !== undefined);
-  check("budget resolved to 25 from '$25 tops'", filled.budgetCapUSD?.value === 25);
-  check("dietary accumulated, not overwritten", filled.dietary?.value?.includes("vegetarian") === true);
-  check("every required slot filled after 5 messages", lastMissing.length === 0, `(${lastMissing.join(",")})`);
-  check("slots were persisted to the store", Object.keys(filled).length >= 5);
+  const profile = (await dmStore.getUser("new-maya"))?.profile;
+  check("profile learned home", profile?.home?.label.toLowerCase().includes("bushwick") === true);
+  check("profile learned dietary", profile?.dietary?.includes("vegetarian") === true);
+  check("profile learned a Tuesday blackout", profile?.blackouts?.[0]?.days.includes(2) === true);
+  check("a named favourite became a venue id", profile?.preferredSpots.includes("joes-pizza") === true);
+  check("onboarding completed", (await dmStore.getUser("new-maya"))?.onboardedAt !== undefined);
+  check("after onboarding it asks about time, not location", /what time works/i.test(turn.reply));
+  check("and it says what it reused", /from your profile/i.test(turn.reply));
 
-  // The standing profile seeds a NEW plan, and an explicit answer still wins.
-  await dmStore.upsertUser({
-    _id: "test-dev",
-    phone: "+1555",
-    profile: {
-      home: { lat: 40.7127, lng: -74.0134, label: "World Trade Center" },
-      defaultBudgetUSD: 60,
-      tastes: ["pizza"],
-      preferredSpots: ["joes-pizza"],
-    },
-    wishlist: [],
-  });
-  const seeded = await handleDM({ planId: "plan-dm2", userId: "test-dev", text: "$25 tops" }, dmStore);
+  console.log("\nSAME USER, SECOND PLAN (profile already known)");
+  let second = await say("new-maya", "plan-b", "dinner sunday?");
+  console.log(`  "dinner sunday?"`.padEnd(30) + `-> ${second.reply}`);
   check(
-    "standing profile seeds a fresh plan",
-    seeded.slots.home?.value?.label === "World Trade Center",
+    "a returning user is not asked for location or diet again",
+    !second.missing.includes("home") && !second.missing.includes("dietary"),
   );
-  check("an explicit answer beats the seeded default", seeded.slots.budgetCapUSD?.value === 25);
-  check("seeded profile tastes reach the soft signals", seeded.slots.tags?.includes("pizza") === true);
+  check("but budget is still asked every plan", second.missing.includes("budgetCapUSD"));
+
+  for (const text of ["after 7", "i dont mind traveling", "$25 tops"]) {
+    second = await say("new-maya", "plan-b", text);
+    console.log(`  "${text}"`.padEnd(30) + `-> ${second.reply}`);
+  }
+  check("second plan completes in three answers", second.missing.length === 0);
+  check("budget resolved to 25", second.slots.budgetCapUSD?.value === 25);
+  check("budget stayed out of the profile", !("defaultBudgetUSD" in ((await dmStore.getUser("new-maya"))?.profile ?? {})));
+
+  const transcript = await dmStore.listMessages("plan-b", "new-maya");
+  check("messages are stored both directions", transcript.some((m) => m.direction === "in") && transcript.some((m) => m.direction === "out"));
+  check("transcript length matches the exchange", transcript.length === 8, `(${transcript.length})`);
+
+  // A bare reply lands on the slot that was just asked about.
+  check(
+    "'30' is read as travel time when travel was asked",
+    extractOffline("30", "maxTravelMin").travelRaw === "30" &&
+      extractOffline("30", "maxTravelMin").budgetRaw === undefined,
+  );
+  check(
+    "'30' is read as budget when budget was asked",
+    extractOffline("30", "budgetCapUSD").budgetRaw === "30" &&
+      extractOffline("30", "budgetCapUSD").travelRaw === undefined,
+  );
+
+  const tuesday = resolveBlackouts("class on tuesday nights and work until 7 on weekdays");
+  check("two blackouts parsed from one sentence", tuesday.length === 2, `(${tuesday.length})`);
   await dmStore.close();
 
   // Plan CRUD. A's join flow depends on every one of these.
