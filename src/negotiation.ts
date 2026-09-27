@@ -285,7 +285,7 @@ export async function negotiate(
   for (let round = 1; round <= MAX_ROUNDS; round++) {
     const merged = mergeConstraints(agents.map((a) => a.participant), day);
     if (!hasOverlap(merged.window)) {
-      return { status: "failed", reason: "no-overlap", binding: null, rounds };
+      return { status: "failed", reason: "no-overlap", binding: null, merged, rounds };
     }
 
     const filtered = filterVenues(
@@ -310,7 +310,7 @@ export async function negotiate(
           settledOn,
         ),
       );
-      return { status: "settled", venueId: settledOn, rounds };
+      return { status: "settled", venueId: settledOn, merged, rounds };
     }
 
     // Nobody agreed. Find the relaxation that would actually admit more venues,
@@ -336,19 +336,23 @@ export async function negotiate(
     if (concessions.length === 0) {
       if (filtered.survivors.length > 0) {
         const fallback = bestWorstCase(filtered.survivors, positions);
-        if (fallback) return { status: "settled", venueId: fallback, rounds };
+        if (fallback) return { status: "settled", venueId: fallback, merged, rounds };
       }
-      return { status: "failed", reason: "deadlock", binding: objection, rounds };
+      return { status: "failed", reason: "deadlock", binding: objection, merged, rounds };
     }
   }
 
   // Round cap. Fall back to the least-bad option rather than failing outright.
-  const merged = mergeConstraints(agents.map((a) => a.participant), day);
-  const filtered = filterVenues(VENUES, merged, travelProfiles(agents.map((a) => a.participant)));
+  const finalMerged = mergeConstraints(agents.map((a) => a.participant), day);
+  const filtered = filterVenues(
+    VENUES,
+    finalMerged,
+    travelProfiles(agents.map((a) => a.participant)),
+  );
   if (filtered.survivors.length > 0) {
     const positions = await positionsFor(agents, filtered.survivors);
     const fallback = bestWorstCase(filtered.survivors, positions);
-    if (fallback) return { status: "settled", venueId: fallback, rounds };
+    if (fallback) return { status: "settled", venueId: fallback, merged: finalMerged, rounds };
   }
-  return { status: "failed", reason: "round-cap", binding: lastObjection, rounds };
+  return { status: "failed", reason: "round-cap", binding: lastObjection, merged: finalMerged, rounds };
 }

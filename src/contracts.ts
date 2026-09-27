@@ -137,12 +137,15 @@ export type Position = {
 
 // Rounds are RoundLog so they can be appended with store.appendRound and read by
 // the backroom screen without conversion.
+// `merged` is returned so the caller can pick a time for the plan card without
+// recomputing it -- and it is the relaxed version, after any concessions.
 export type NegotiationResult =
-  | { status: "settled"; venueId: string; rounds: RoundLog[] }
+  | { status: "settled"; venueId: string; merged: MergedConstraints; rounds: RoundLog[] }
   | {
       status: "failed";
       reason: "no-overlap" | "deadlock" | "round-cap";
       binding: Objection | null;
+      merged: MergedConstraints;
       rounds: RoundLog[];
     };
 
