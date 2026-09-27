@@ -1,6 +1,9 @@
 import { randomInt } from "node:crypto";
-import type { PlanDoc, UserDoc } from "./contracts.ts";
+import type { PlanDoc, RequiredSlot, UserDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
+import { botLog, slotSnapshot } from "./log.ts";
+import { forgetNessieOffer } from "./nessie.ts";
+import { missingSlots } from "./slots.ts";
 import { findVenueByName } from "./venues.ts";
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -8,6 +11,8 @@ const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 export type SpaceRef = { spaceId: string; linePhone?: string };
 
 const spaces = new Map<string, SpaceRef>();
+const confirms = new Map<string, Set<string>>();
+const lastCards = new Map<string, string>();
 
 function spaceKey(planId: string, userId: string): string {
   return `${planId}:${userId}`;
@@ -22,10 +27,59 @@ export function forgetSpaces(planId: string): void {
   for (const key of [...spaces.keys()]) {
     if (key.startsWith(`${planId}:`)) spaces.delete(key);
   }
+  confirms.delete(planId);
+  lastCards.delete(planId);
+}
+
+export function rememberCard(planId: string, text: string): void {
+  lastCards.set(planId, text);
+  confirms.set(planId, new Set());
+}
+
+export function cardFor(planId: string): string | undefined {
+  return lastCards.get(planId);
+}
+
+export function markConfirm(planId: string, userId: string): { first: boolean; have: number } {
+  let set = confirms.get(planId);
+  if (!set) {
+    set = new Set();
+    confirms.set(planId, set);
+  }
+  const first = !set.has(userId);
+  set.add(userId);
+  return { first, have: set.size };
+}
+
+export function waitingIds(plan: PlanDoc): string[] {
+  const set = confirms.get(plan._id) ?? new Set();
+  return plan.participants.filter((id) => !set.has(id));
+}
+
+export function isConfirmEmoji(emoji: string): boolean {
+  return /👍|❤️|❤|😍|✅|😂|‼️|💯/.test(emoji) && !emoji.includes("👎");
+}
+
+export function parseConfirmText(text: string): boolean {
+  const trimmed = text.trim();
+  if (/^(yes|yep|yeah|ok|okay|works|confirm|👍|❤️)$/i.test(trimmed)) return true;
+  return /^(Liked|Loved|Laughed at|Emphasized)\b/i.test(trimmed);
 }
 
 export function parseLeave(text: string): boolean {
   return /^(reset|leave|new plan|abandon|start over)\b/i.test(text.trim());
+}
+
+export function parseForgetMe(text: string): boolean {
+  return /^\s*forget me\s*$/i.test(text);
+}
+
+export function forgetUserSpaces(userId: string): void {
+  const suffix = `:${userId}`;
+  for (const key of [...spaces.keys()]) {
+    if (key.endsWith(suffix)) spaces.delete(key);
+  }
+  for (const set of confirms.values()) set.delete(userId);
 }
 
 export function parseGo(text: string): boolean {
@@ -124,6 +178,37 @@ export async function activePlan(store: Store, userId: string): Promise<PlanDoc 
   return store.getPlan(user.activePlanId);
 }
 
+export type GoReadiness = {
+  userId: string;
+  missing: RequiredSlot[];
+  slots: Record<string, unknown>;
+};
+
+// Same check onGo uses: stored plan slots only, no profile re-seed. A person
+// who texted but never JOIN'd is not in participants and cannot block go.
+export async function goReadiness(store: Store, plan: PlanDoc): Promise<GoReadiness[]> {
+  const rows: GoReadiness[] = [];
+  for (const userId of plan.participants) {
+    const slots = await store.getSlots(plan._id, userId);
+    rows.push({ userId, missing: missingSlots(slots), slots: slotSnapshot(slots) });
+  }
+  return rows;
+}
+
+export function goBlockers(rows: GoReadiness[]): GoReadiness[] {
+  return rows.filter((row) => row.missing.length > 0);
+}
+
+export function logGoReadiness(rows: GoReadiness[]): void {
+  for (const row of rows) {
+    botLog("go: readiness", {
+      userId: row.userId,
+      missing: row.missing.length ? row.missing : "(none)",
+      ...row.slots,
+    });
+  }
+}
+
 export async function abandonPlan(
   store: Store,
   userId: string,
@@ -150,6 +235,18 @@ export async function abandonPlan(
     message: "You've left the plan. Text dinner plans to host, or JOIN a code.",
     notify: null,
   };
+}
+
+export async function forgetUser(store: Store, userId: string): Promise<string> {
+  const plan = await activePlan(store, userId);
+  if (plan) await store.setSlots(plan._id, userId, {});
+  await store.deleteUser(userId);
+  forgetUserSpaces(userId);
+  forgetNessieOffer(userId);
+  botLog("forget me", { userId, planId: plan?._id });
+  return plan
+    ? "Forgotten — next text is first-time setup. This plan still lists you until the host sends reset."
+    : "Forgotten — next text is first-time setup.";
 }
 
 export async function saveFavorite(store: Store, userId: string, place: string): Promise<string> {
