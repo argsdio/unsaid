@@ -5,7 +5,8 @@ import { normalise } from "./gazetteer.ts";
 // "brunch" is never swallowed by "lunch" as a substring.
 const WORDS: Array<[Occasion, string[]]> = [
   ["brunch", ["brunch", "breakfast", "bfast", "morning"]],
-  ["coffee", ["coffee", "cafe", "espresso", "tea"]],
+  // Boba is a coffee-shaped outing: an afternoon, a drink, somewhere cheap.
+  ["coffee", ["coffee", "cafe", "espresso", "tea", "boba", "bubble tea", "matcha", "dessert", "ice cream", "hang out", "study"]],
   ["drinks", ["drinks", "drink", "cocktails", "bar", "happy hour", "nightcap", "beers"]],
   ["lunch", ["lunch", "midday", "noon"]],
   ["dinner", ["dinner", "supper", "eat", "food", "tonight"]],

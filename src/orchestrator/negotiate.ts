@@ -4,7 +4,7 @@ import type { Store } from "../db.ts";
 import { negotiate, resumeNegotiation } from "../negotiation.ts";
 import { venueById } from "../venues.ts";
 import { botLog, slotSnapshot } from "../log.ts";
-import { nothingFits, pickTime, planCard, whenLabel } from "./messages.ts";
+import { describeVenue, nothingFits, pickTime, planCard, whenLabel } from "./messages.ts";
 
 export type NegotiateOutcome =
   // A shortlist of up to three. `poll` is the same options as a Spectrum poll
@@ -102,7 +102,9 @@ async function toOutcome(
   // pickTime already returns a formatted clock ("7:00 PM"), not an ISO string.
   // Slicing it produced an empty string and the message read "tonight at :".
   const when = whenLabel(plan.occasion, plan.date);
-  const lines = venues.map((v, i) => `${i + 1}. ${v.name} (${v.neighborhood}) · about $${v.estCostUSD}`);
+  const lines = venues.map(
+    (v, i) => `${i + 1}. ${v.name} — ${describeVenue(v)} · ${v.neighborhood} · about $${v.estCostUSD}`,
+  );
   const choices = venues.map((_, i) => i + 1);
   const replyHint =
     choices.length === 2

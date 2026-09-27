@@ -3,6 +3,7 @@ import { GROK_MODEL, grok } from "../grok.ts";
 import type { RawSlots } from "../resolve/index.ts";
 import { resolveBudget, resolveTravelMin, resolveWindow } from "../resolve/index.ts";
 import { resolveBlackouts } from "../resolve/blackout.ts";
+import { tasteWords } from "../venues.ts";
 import { resolveDietary } from "../resolve/dietary.ts";
 import { type Geocoder, resolveHome } from "../resolve/location.ts";
 
@@ -52,6 +53,11 @@ export function extractOffline(text: string, expecting?: ExtractContext["expecti
   if (resolveWindow(text).value !== null) raw.windowRaw = text;
   if (resolveTravelMin(text).value !== null) raw.travelRaw = text;
   if (resolveBlackouts(text).length > 0) raw.blackoutRaw = text;
+
+  // "somewhere nice", "cheap", "thai" -- said in the opening message as often as
+  // in an answer, and thrown away entirely before this.
+  const tastes = tasteWords(text);
+  if (tastes.length) raw.tags = tastes;
 
   // budgetRaw and travelRaw come from resolvers that will claim almost any bare
   // number, so on a brief answer they may only fill the slot actually being

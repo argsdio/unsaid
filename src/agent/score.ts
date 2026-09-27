@@ -1,6 +1,6 @@
 import type { Evaluation, Slots, Survivor, Venue } from "../contracts.ts";
 import { GROK_MODEL, grok } from "../grok.ts";
-import { venueById } from "../venues.ts";
+import { matchesVibe, priceTier, venueById } from "../venues.ts";
 
 export type ScoreContext = {
   slots: Slots;
@@ -22,12 +22,18 @@ export function scoreLocal(venue: Venue, longestTravelMin: number, ctx: ScoreCon
   if (liked.has(venue.id)) score += 0.5;
 
   const wanted = new Set([...ctx.tastes, ...(ctx.slots.tags ?? [])].map((t) => t.toLowerCase()));
-  const overlap = venue.tags.filter((t) => wanted.has(t.toLowerCase())).length;
+  const overlap = [...venue.tags, venue.cuisine ?? ""].filter((t) => t && wanted.has(t.toLowerCase())).length;
   score += Math.min(0.3, overlap * 0.12);
+
+  // "somewhere cheap" and "somewhere nice" are about the tier, not a tag, and a
+  // budget cap cannot express the second one at all.
+  if (matchesVibe(venue, [...ctx.tastes, ...(ctx.slots.tags ?? []), ...(ctx.slots.unresolved ?? [])])) {
+    score += 0.1;
+  }
 
   // Soft signal only: unresolved phrases are scored, never filtered on.
   const soft = (ctx.slots.unresolved ?? []).join(" ").toLowerCase();
-  if (soft && venue.tags.some((t) => soft.includes(t.toLowerCase()))) score += 0.05;
+  if (soft && [...venue.tags, venue.cuisine ?? ""].some((t) => t && soft.includes(t.toLowerCase()))) score += 0.05;
 
   score -= Math.min(0.25, (longestTravelMin / 60) * 0.25);
 
@@ -81,8 +87,10 @@ export async function scoreCandidates(
             candidates: pairs.map(({ venue, survivor }) => ({
               venueId: venue.id,
               name: venue.name,
+              cuisine: venue.cuisine,
               tags: venue.tags,
               estCostUSD: venue.estCostUSD,
+              price: priceTier(venue),
               travelMin: survivor.longestTravelMin,
             })),
           }),

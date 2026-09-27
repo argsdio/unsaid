@@ -1,4 +1,5 @@
 import type { Candidate, FailedOn, TimeWindow , Occasion } from "../contracts.ts";
+import { priceTier } from "../venues.ts";
 import type { Venue } from "../contracts.ts";
 
 export function pickTime(window: TimeWindow): string {
@@ -23,6 +24,13 @@ export function whenLabel(occasion: Occasion = "dinner", date?: string): string 
   return `${weekday} ${occasion}`;
 }
 
+// "Thai · $$" is the pair of facts people use to decide, and it is two words
+// instead of a sentence.
+export function describeVenue(venue: Venue): string {
+  const cuisine = venue.cuisine ? venue.cuisine[0]!.toUpperCase() + venue.cuisine.slice(1) : "";
+  return [cuisine, priceTier(venue)].filter(Boolean).join(" · ");
+}
+
 export function planCard(
   venue: Venue,
   card: Candidate,
@@ -31,7 +39,7 @@ export function planCard(
 ): string {
   return [
     `${whenLabel(occasion, date)}: ${venue.name} (${venue.neighborhood})`,
-    `About $${card.estCostUSD} · ${card.time} ET`,
+    `${describeVenue(venue)} · about $${card.estCostUSD} · ${card.time} ET`,
     "",
     `Tap 👍 if this works for you.`,
   ].join("\n");

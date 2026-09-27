@@ -12,7 +12,7 @@ import { resolveBlackouts } from "./resolve/blackout.ts";
 import { defaultWindow, resolveWindow } from "./resolve/time.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
 import { nothingFits, whenLabel } from "./orchestrator/messages.ts";
-import { VENUES, filterVenues, venueById } from "./venues.ts";
+import { VENUES, filterVenues, matchesVibe, priceTier, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
@@ -329,6 +329,58 @@ async function main(): Promise<void> {
     ["cheap", "vegetarian", "bushwick", "30 min"].every((t) => resolveWindow(t).value === null),
   );
 
+  // The catalogue is hand-written, so it gets validated like input rather than
+  // trusted like code. Each of these has already caught a real typo.
+  check(
+    "every venue has a unique id and name",
+    new Set(VENUES.map((v) => v.id)).size === VENUES.length &&
+      new Set(VENUES.map((v) => v.name)).size === VENUES.length,
+  );
+  check(
+    "every venue says what kind of place it is and what it costs",
+    VENUES.every((v) => v.cuisine && v.estCostUSD > 0 && v.tags.length > 0),
+    VENUES.filter((v) => !v.cuisine).map((v) => v.name).join(", "),
+  );
+  check(
+    "every venue is plausible for at least one occasion, and only real ones",
+    VENUES.every((v) => (v.meals ?? []).length > 0 && v.meals!.every((m) => OCCASIONS.includes(m))),
+  );
+  check(
+    "every venue is in New York",
+    VENUES.every((v) => v.lat > 40.4 && v.lat < 41.0 && v.lng > -74.3 && v.lng < -73.6),
+  );
+  // A drinks outing means a bar, and estCostUSD is a meal estimate: without this
+  // a $95 restaurant with a cocktails tag wins a drinks shortlist.
+  check(
+    "nothing expensive is offered as a place for drinks",
+    VENUES.filter((v) => v.meals?.includes("drinks")).every((v) => v.estCostUSD <= 35),
+    VENUES.filter((v) => v.meals?.includes("drinks") && v.estCostUSD > 35).map((v) => v.name).join(", "),
+  );
+  check(
+    "the price tier tracks the price",
+    priceTier({ ...VENUES[0]!, estCostUSD: 9 }) === "$" &&
+      priceTier({ ...VENUES[0]!, estCostUSD: 28 }) === "$$" &&
+      priceTier({ ...VENUES[0]!, estCostUSD: 95 }) === "$$$$",
+  );
+  check(
+    "the opening message's taste words survive",
+    extractOffline("somewhere nice for dinner friday").tags?.includes("nice") === true &&
+      extractOffline("cheap thai near me").tags?.includes("thai") === true &&
+      extractOffline("cheap thai near me").tags?.includes("cheap") === true,
+    JSON.stringify(extractOffline("somewhere nice for dinner friday").tags),
+  );
+  check(
+    "a plain answer picks up no taste words",
+    (extractOffline("east village").tags ?? []).length === 0 &&
+      (extractOffline("i eat everything").tags ?? []).length === 0,
+  );
+  check(
+    "'somewhere cheap' and 'somewhere nice' point at different places",
+    matchesVibe({ ...VENUES[0]!, estCostUSD: 9 }, ["somewhere cheap"]) &&
+      !matchesVibe({ ...VENUES[0]!, estCostUSD: 9 }, ["somewhere nice"]) &&
+      matchesVibe({ ...VENUES[0]!, estCostUSD: 45 }, ["somewhere nice"]),
+  );
+
   // The occasion. Everything used to assume dinner tonight: the 17:00 default,
   // a bare hour meaning PM, the word "Tonight", and a dinner-only catalogue.
   check(
@@ -339,6 +391,12 @@ async function main(): Promise<void> {
       resolveOccasion("lunch monday") === "lunch",
   );
   check("an opening message with no occasion is dinner", resolveOccasion("are we doing something friday") === "dinner");
+  check(
+    "boba, matcha and dessert are a coffee outing",
+    ["boba tmrw?", "bubble tea after class", "matcha run", "dessert somewhere"].every(
+      (t) => resolveOccasion(t) === "coffee",
+    ),
+  );
   check(
     "a bare '11' is 11am for brunch and 11pm for drinks",
     resolveWindow("11", new Date(), "brunch").value?.start.slice(11, 16) === "11:00" &&

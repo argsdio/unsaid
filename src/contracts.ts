@@ -96,10 +96,13 @@ export type Venue = {
   neighborhood: string;
   lat: number;
   lng: number;
-  // Which occasions this venue is plausible for. Optional because the current
-  // catalogue is hand-written and infers them from tags; a Places-sourced
-  // catalogue would set them from real `types`.
+  // Which occasions this venue is plausible for. Optional so a venue added
+  // without it still works -- `mealsFor` infers meals from tags as a fallback.
   meals?: Occasion[];
+  // What kind of place it is, one word, for copy and for matching what somebody
+  // said they felt like. `tags` stays the fuller list: it carries the dietary
+  // tags filterVenues treats as hard requirements.
+  cuisine?: string;
 };
 
 // One aggregate per survivor, so whose commute it is stays unlabelled.
