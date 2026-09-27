@@ -53,6 +53,7 @@ Read out of `node_modules/@spectrum-ts/core` and `node_modules/@spectrum-ts/imes
 
 4. everyone answers questions in their own 1-on-1 thread, creator included
    A calls handleDM per message; B fills slots and writes the reply
+   (a first-time user gets four profile questions first — handled inside handleDM)
 
 5. creator texts "go" → status: negotiating
    B merges, filters, scores; A logs the round and picks
@@ -230,7 +231,11 @@ import { VENUES, filterVenues, venueById } from "./venues.ts";
 
 | Import from | Signature |
 |---|---|
-| `./db.ts` | `openStore(): Promise<Store>` — Mongo when `MONGODB_URI` is set, else in memory |
+| `./db.ts` | `openStore(opts?): Promise<Store>` — Mongo when `MONGODB_URI` is set, else in memory. Call **once at startup** |
+| `./db.ts` | `store.createPlan(plan: PlanDoc): Promise<boolean>` — **false** if the code is taken or the planId exists |
+| `./db.ts` | `store.getPlanByJoinCode(code): Promise<PlanDoc \| null>` — only matches a plan that is still live |
+| `./db.ts` | `store.getPlan(planId)`, `store.addParticipant(planId, userId)` (idempotent), `store.setStatus(planId, status)` |
+| `./db.ts` | `store.appendRound(round)`, `store.listRounds(planId)` — contract 7 |
 | `./slots.ts` | `handleDM(input: HandleDMInput, store: Store): Promise<HandleDMResult>` |
 | `./aggregator.ts` | `mergeConstraints(people: Participant[], day?: Date): MergedConstraints` |
 | `./aggregator.ts` | `travelProfiles(people: Participant[]): TravelProfile[]` |
@@ -243,16 +248,24 @@ import { VENUES, filterVenues, venueById } from "./venues.ts";
 
 Two that are easy to call wrongly:
 
-- **`handleDM` takes the store as a second argument.** It loads existing slots, seeds from the standing profile and persists, so A never reads or writes slots directly.
+- **`handleDM` takes the store as a second argument**, and a third optional `day: Date` that A can ignore. It loads slots, seeds from the standing profile, persists, and stores the message — so A never reads or writes slots directly.
+- **`handleDM` also runs onboarding**, invisibly to A. A first-time user is asked four profile questions (where they head out from, dietary needs, times that never work, favourite places) before any plan questions. A's code is identical either way; the only observable difference is that a first-ever plan takes about eight messages to fill rather than four, so `missing` stays non-empty longer. **Pre-seed the demo users' profiles** and the demo shows the fast path: a returning user finishes in three answers, and the reply says what it reused.
 - **`filterVenues` takes `TravelProfile[]`, not participants.** Build it with `travelProfiles(people)`. Homes and travel caps live inside that array and never reach A's own logic — that is the mechanism behind the privacy claim, not a convention.
 
 ### What A needs from B
 
-`getPlanByJoinCode(code)` does not exist. It is the only hard dependency and A's join flow cannot work without it. Until B adds it, stub it against a local `Map<string, string>` and swap in one line later.
+**Nothing is outstanding.** `getPlanByJoinCode` and the rest of the plan CRUD are built and covered by assertions, so nothing needs stubbing.
+
+Two behaviours to rely on rather than reimplement:
+
+- **A join code only resolves while the plan is live** (`collecting` / `negotiating` / `proposed`). A confirmed plan stops answering to its code, so codes are reusable across demo re-runs and a stale code cannot pull someone into a finished plan.
+- **`createPlan` returns `false`** if the code is already held by a live plan or the planId exists — so A cannot mint a duplicate by accident. No uniqueness check needed on A's side.
 
 ### What has no running code yet
 
-Contracts 1, 3, 4 and 6 are implemented and covered by `npm run harness` (19 assertions, green with no API keys and no Atlas). Contract 2 is implemented but **never exercised** — `handleDM` has no test. Contracts 5, 7 and 9 are types with nothing behind them on either side.
+Contracts 1, 2, 3, 4, 6 and 8 are implemented and covered by `npm run harness` — **47 assertions**, green against real Atlas and green with no API keys at all. Contracts 5, 7 and 12 are types with nothing behind them on either side; contract 9 (Nessie) is A's.
+
+**One caveat that matters at 9pm:** the Grok branch of `extract()` has still never executed, because no `XAI_API_KEY` has been set. Everything that passes today runs the offline extractor. Both paths fail *silently* to the fallback, so a wrong model name or a broken prompt looks exactly like success — extraction just gets quietly worse. Set the key and re-run the harness before the end-to-end run.
 
 ## Contracts, from A's side
 
