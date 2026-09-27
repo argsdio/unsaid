@@ -35,6 +35,11 @@ const NONE_PHRASES = [
   "not picky",
   "im not picky",
   "no preference",
+  "no diet preference",
+  "no dietary preference",
+  "i have no diet preference",
+  "i have no dietary preference",
+  "no diet",
   "omnivore",
   "unrestricted",
   "none",
@@ -77,11 +82,10 @@ export function resolveDietary(raw: string): DietaryResult {
   }
 
   if (found.size > 0) {
-    // Partial resolution: the canonical part filters, the rest stays soft.
     return { slot: { raw, value: [...found], confidence: "high" }, unresolved };
   }
 
-  if (NONE_PHRASES.includes(text)) {
+  if (NONE_PHRASES.includes(text) || NONE_PHRASES.some((p) => p.length >= 10 && text.includes(p))) {
     return { slot: { raw, value: [], confidence: "high" }, unresolved: [] };
   }
 

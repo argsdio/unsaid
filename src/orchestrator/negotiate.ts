@@ -4,6 +4,7 @@ import { scoreCandidates } from "../agent/score.ts";
 import type { PlanDoc } from "../contracts.ts";
 import type { Store } from "../db.ts";
 import { VENUES, filterVenues, venueById } from "../venues.ts";
+import { botLog, slotSnapshot } from "../log.ts";
 import { nothingFits, pickTime, planCard } from "./messages.ts";
 import { selectBestWorst } from "./select.ts";
 
@@ -16,16 +17,31 @@ export async function runNegotiation(store: Store, plan: PlanDoc): Promise<Negot
   for (const userId of plan.participants) {
     const slots = await store.getSlots(plan._id, userId);
     people.push({ userId, slots });
+    botLog("go: stored slots for participant", { userId, ...slotSnapshot(slots) });
   }
 
   const merged = mergeConstraints(people);
+  botLog("go: merged hard limits (what the filter sees)", merged);
   if (!hasOverlap(merged.window)) {
+    botLog("go: fail — no overlapping time window", merged.window);
     return { ok: false, text: nothingFits(["time"]) };
   }
 
   const filtered = filterVenues(VENUES, merged, travelProfiles(people));
+  const rejectionCounts: Record<string, number> = {};
+  for (const r of filtered.rejected) {
+    rejectionCounts[r.failedOn] = (rejectionCounts[r.failedOn] ?? 0) + 1;
+  }
+  botLog("go: filter result", {
+    survivors: filtered.survivors.length,
+    of: VENUES.length,
+    rejectionCounts,
+    mergedBudget: merged.budgetCapUSD,
+    mergedDiet: merged.requiredDietary,
+  });
   if (filtered.survivors.length === 0) {
     const areas = [...new Set(filtered.rejected.map((r) => r.failedOn))];
+    botLog("go: fail — zero venues survived hard filters", { areas, rejectionCounts });
     return { ok: false, text: nothingFits(areas) };
   }
 
@@ -71,6 +87,7 @@ export async function runNegotiation(store: Store, plan: PlanDoc): Promise<Negot
   await store.appendRound(round);
 
   if (!chosen) {
+    botLog("go: fail — survivors existed but none passed scoring for everyone");
     return {
       ok: false,
       text: "Some places passed the hard cuts, but none worked for everyone. Flex on budget, diet, or travel, then the host can send go again.",
@@ -88,5 +105,6 @@ export async function runNegotiation(store: Store, plan: PlanDoc): Promise<Negot
     estCostUSD: venue.estCostUSD,
   };
 
+  botLog("go: picked venue", { name: venue.name, time: card.time, estCostUSD: card.estCostUSD });
   return { ok: true, text: planCard(venue, card) };
 }

@@ -45,6 +45,7 @@ export async function fanOut(
         await dest!.send(text);
       });
       sent += 1;
+      console.log("[unsaid] fan-out ok", userId);
     } catch (err) {
       failed += 1;
       console.error("fan-out send failed", userId, err);

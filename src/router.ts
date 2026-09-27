@@ -19,6 +19,7 @@ import {
   spacesFor,
 } from "./plan.ts";
 import { handleDM, missingSlots } from "./slots.ts";
+import { botLog, slotSnapshot } from "./log.ts";
 
 function spaceKind(space: unknown): "dm" | "group" | "unknown" {
   if (typeof space === "object" && space !== null && "type" in space) {
@@ -40,7 +41,8 @@ function asTrackedSpace(space: Space): { id: string; phone?: string } {
   return { id: space.id, phone };
 }
 
-async function send(space: Space, text: string): Promise<void> {
+async function send(space: Space, text: string, reason: string): Promise<void> {
+  botLog(`send (${reason})`, text);
   await space.responding(async () => {
     await space.send(text);
   });
@@ -54,22 +56,22 @@ async function onGo(
 ): Promise<void> {
   const plan = await activePlan(store, userId);
   if (!plan) {
-    await send(space, "You're not on a plan yet. Text dinner plans to create one, or JOIN a code.");
+    await send(space, "You're not on a plan yet. Text dinner plans to create one, or JOIN a code.", "go: no active plan");
     return;
   }
 
   if (!isHost(plan, userId)) {
-    await send(space, "Only the host can send go.");
+    await send(space, "Only the host can send go.", "go: sender is not host");
     return;
   }
 
   if (plan.status === "proposed" || plan.status === "confirmed") {
-    await send(space, "The plan is already out. Tap 👍 on the card if you haven't.");
+    await send(space, "The plan is already out. Tap 👍 on the card if you haven't.", "go: already proposed/confirmed");
     return;
   }
 
   if (plan.status === "negotiating") {
-    await send(space, "Working on it.");
+    await send(space, "Working on it.", "go: already negotiating");
     return;
   }
 
@@ -90,6 +92,7 @@ async function onGo(
     await send(
       space,
       `Still waiting on everyone's ${listed}. They'll get “got everything” when those are done.`,
+      `go: missing slots [${listed}]`,
     );
     return;
   }
@@ -99,7 +102,7 @@ async function onGo(
 
   if (!outcome.ok) {
     await store.setStatus(plan._id, "collecting");
-    await send(space, outcome.text);
+    await send(space, outcome.text, "go: negotiation failed (see go: logs above)");
     return;
   }
 
@@ -111,6 +114,7 @@ async function onGo(
     await send(
       space,
       `Sent the plan to ${result.sent} of ${plan.participants.length}. Someone may need to text Unsaid again.`,
+      "go: fan-out partial failure",
     );
   }
 }
@@ -129,18 +133,19 @@ export async function onDirectText(
   const tracked = asTrackedSpace(space);
   const joinCode = parseJoin(text);
   const current = await activePlan(store, userId);
+  botLog("inbound", { userId, text, hasPlan: Boolean(current), planStatus: current?.status });
 
   if (joinCode) {
     const result = await joinPlan(store, userId, joinCode, tracked);
     if ("error" in result) {
-      await send(space, result.error);
+      await send(space, result.error, "join: unknown or retired code");
       return;
     }
     const { reply } = await handleDM(
       { planId: result.plan._id, userId, text: "ready to join" },
       store,
     );
-    await send(space, `You're in (${result.plan.joinCode}).\n\n${reply}`);
+    await send(space, `You're in (${result.plan.joinCode}).\n\n${reply}`, "join: attached + handleDM");
     console.log("join", { userId, planId: result.plan._id, joinCode: result.plan.joinCode });
     return;
   }
@@ -156,7 +161,7 @@ export async function onDirectText(
       });
       forgetSpaces(notify._id);
     } else {
-      await send(space, message);
+      await send(space, message, "leave: self only");
     }
     return;
   }
@@ -164,7 +169,7 @@ export async function onDirectText(
   const favorite = parseAddFavorite(text);
   if (favorite) {
     if (current) rememberSpace(current._id, userId, tracked);
-    await send(space, await saveFavorite(store, userId, favorite));
+    await send(space, await saveFavorite(store, userId, favorite), "favorite: saved without slot-fill");
     return;
   }
 
@@ -176,24 +181,26 @@ export async function onDirectText(
   if (!current) {
     const plan = await createPlan(store, userId, tracked);
     const { reply } = await handleDM({ planId: plan._id, userId, text }, store);
-    await send(space, `${shareText(plan.joinCode)}\n\n${reply}`);
+    await send(space, `${shareText(plan.joinCode)}\n\n${reply}`, "create: new plan + handleDM");
     console.log("create", { userId, planId: plan._id, joinCode: plan.joinCode });
     return;
   }
 
   if (current.status === "negotiating") {
-    await send(space, "Working on it.");
+    await send(space, "Working on it.", "inbound ignored: status negotiating");
     return;
   }
 
   if (current.status === "proposed" || current.status === "confirmed") {
-    await send(space, "The plan is already out. Tap 👍 on the card to confirm.");
+    await send(space, "The plan is already out. Tap 👍 on the card to confirm.", "inbound ignored: status proposed/confirmed");
     return;
   }
 
   rememberSpace(current._id, userId, tracked);
-  const { reply } = await handleDM({ planId: current._id, userId, text }, store);
-  await send(space, reply);
+  botLog("handleDM inbound", { userId, planId: current._id, text });
+  const result = await handleDM({ planId: current._id, userId, text }, store);
+  botLog("handleDM stored slots after parse", { userId, missing: result.missing, ...slotSnapshot(result.slots) });
+  await send(space, result.reply, `handleDM next question (missing: ${result.missing.join(", ") || "none"})`);
 }
 
 export async function routeMessage(
