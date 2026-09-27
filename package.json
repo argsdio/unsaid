@@ -7,7 +7,8 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "harness": "tsx src/harness.ts",
-    "backroom": "tsx src/backroom/server.ts"
+    "backroom": "tsx src/backroom/server.ts",
+    "polltest": "tsx src/polltest.ts"
   },
   "dependencies": {
     "dotenv": "^18.0.4",
