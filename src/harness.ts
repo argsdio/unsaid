@@ -12,7 +12,7 @@ import { resolveBlackouts } from "./resolve/blackout.ts";
 import { defaultWindow, resolveWindow } from "./resolve/time.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
 import { nothingFits, whenLabel } from "./orchestrator/messages.ts";
-import { VENUES, filterVenues, matchesVibe, priceTier, venueById } from "./venues.ts";
+import { VENUES, filterVenues, findVenueByName, matchesVibe, priceTier, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
@@ -192,10 +192,13 @@ async function main(): Promise<void> {
 
   console.log("\nASSERTIONS");
   check("a plan was produced", winner !== null);
+  // A band, not a number: the catalogue is now Places-sourced and grows whenever
+  // `npm run venues` runs. Zero means the filter is broken; everything means it
+  // is not filtering.
   check(
-    "survivor count in the 6-17 range",
-    survivors.length >= 6 && survivors.length <= 17,
-    `(${survivors.length})`,
+    "the three demo profiles leave a usable shortlist to choose from",
+    survivors.length >= 6 && survivors.length <= VENUES.length * 0.25,
+    `(${survivors.length} of ${VENUES.length})`,
   );
 
   const keys = Object.keys(merged).sort().join(",");
@@ -331,6 +334,25 @@ async function main(): Promise<void> {
 
   // The catalogue is hand-written, so it gets validated like input rather than
   // trusted like code. Each of these has already caught a real typo.
+  // Scoring hundreds of survivors must stay bounded, and every survivor must
+  // still come back with a score whether or not a model saw it.
+  const manySurvivors = VENUES.slice(0, 120).map((v) => ({ venueId: v.id, longestTravelMin: 20 }));
+  const scoredMany = await scoreCandidates(manySurvivors, { slots: {}, tastes: ["italian"], preferredSpots: [] });
+  check(
+    "every survivor gets a score, however many there are",
+    scoredMany.length === manySurvivors.length && scoredMany.every((e) => e.score > 0),
+    `(${scoredMany.length})`,
+  );
+  check(
+    "a favourite is matched by name, and an ordinary sentence is not",
+    findVenueByName("i love joe's pizza")?.id === "joes-pizza" &&
+      findVenueByName("katz's")?.id === "katzs" &&
+      findVenueByName("my fav is the bar") === undefined &&
+      findVenueByName("grabbing a bite to eat") === undefined &&
+      findVenueByName("posting about it") === undefined,
+    [findVenueByName("my fav is the bar")?.name, findVenueByName("grabbing a bite to eat")?.name]
+      .filter(Boolean).join(", "),
+  );
   check(
     "every venue has a unique id and name",
     new Set(VENUES.map((v) => v.id)).size === VENUES.length &&
@@ -349,12 +371,18 @@ async function main(): Promise<void> {
     "every venue is in New York",
     VENUES.every((v) => v.lat > 40.4 && v.lat < 41.0 && v.lng > -74.3 && v.lng < -73.6),
   );
-  // A drinks outing means a bar, and estCostUSD is a meal estimate: without this
-  // a $95 restaurant with a cocktails tag wins a drinks shortlist.
+  // A drinks outing means a bar. Restaurants carrying a `cocktails` or `wine`
+  // tag used to qualify, so a $95 tasting menu was a candidate for going out
+  // for a drink. A real cocktail lounge can be expensive, so this tests what
+  // kind of place it is rather than what it costs.
+  const forDrinks = VENUES.filter((v) => v.meals?.includes("drinks"));
+  const barish = (v: (typeof VENUES)[number]) =>
+    ["cocktails", "wine", "beer"].includes(v.cuisine ?? "") ||
+    v.tags.some((t) => ["bar", "brewery", "rooftop"].includes(t));
   check(
-    "nothing expensive is offered as a place for drinks",
-    VENUES.filter((v) => v.meals?.includes("drinks")).every((v) => v.estCostUSD <= 35),
-    VENUES.filter((v) => v.meals?.includes("drinks") && v.estCostUSD > 35).map((v) => v.name).join(", "),
+    "only bars are offered as a place for drinks",
+    forDrinks.length > 0 && forDrinks.every(barish),
+    forDrinks.filter((v) => !barish(v)).map((v) => v.name).join(", "),
   );
   check(
     "the price tier tracks the price",
@@ -1037,7 +1065,8 @@ async function main(): Promise<void> {
   check("backroom state builds a round", state.rounds.length === 1);
   check(
     "candidates are joined to venue names",
-    (first?.candidates ?? []).every((c) => c.name !== c.venueId),
+    (first?.candidates ?? []).length > 0 &&
+      (first?.candidates ?? []).every((c) => venueById(c.venueId)?.name === c.name),
   );
   check(
     "rejections carry a category and no reason text",

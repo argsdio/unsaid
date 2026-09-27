@@ -135,11 +135,23 @@ export function filterVenues(
 
 // Loose name match so "I love Joe's Pizza" during onboarding becomes a real
 // venue id rather than a free-text taste word.
+// Loose enough that "i love joes pizza" finds Joe's Pizza, tight enough that a
+// catalogue containing venues called Post, Bite, Folk and Ops does not match
+// them inside an ordinary sentence. The longest match wins, so "max soha" beats
+// a venue merely called Max.
 export function findVenueByName(text: string): Venue | undefined {
-  const needle = text.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
-  if (needle.length < 3) return undefined;
-  return VENUES.find((v) => {
-    const name = v.name.toLowerCase().replace(/[^a-z0-9 ]/g, "");
-    return needle.includes(name) || name.includes(needle);
-  });
+  const flat = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+  const needle = flat(text);
+  if (needle.length < 4) return undefined;
+
+  let best: Venue | undefined;
+  for (const v of VENUES) {
+    const name = flat(v.name);
+    if (name.length < 4) continue;
+    const mentioned = name.length >= 6 && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(needle);
+    const typed = name.startsWith(needle) || (needle.length >= 6 && name.includes(needle));
+    if (!mentioned && !typed) continue;
+    if (!best || name.length > flat(best.name).length) best = v;
+  }
+  return best;
 }

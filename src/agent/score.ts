@@ -11,6 +11,8 @@ export type ScoreContext = {
 // Below this a candidate is a soft veto, which is what the flex whisper asks
 // about. Hard constraints were already applied by filterVenues.
 const PASS_FLOOR = 0.15;
+// How many candidates a model is asked about in one call.
+const GROK_CANDIDATES = 25;
 const WHISPER_FLOOR = 0.25;
 
 // Graded on purpose. Binary 1/0 scores tie at zero under best-worst-case
@@ -66,6 +68,16 @@ export async function scoreCandidates(
   const client = grok();
   if (!client) return local;
 
+  // Only the plausible ones are worth a model call. The catalogue is now
+  // Places-sourced and a loose budget can leave hundreds of survivors, which
+  // would put the whole list in the prompt three times a round. The rest keep
+  // their deterministic score, which is what ranks them anyway.
+  const shortlisted = local
+    .map((evaluation, i) => ({ i, score: evaluation.score }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, GROK_CANDIDATES)
+    .map(({ i }) => pairs[i]!);
+
   try {
     const response = await client.chat.completions.create({
       model: GROK_MODEL,
@@ -84,7 +96,7 @@ export async function scoreCandidates(
             tastes: [...ctx.tastes, ...(ctx.slots.tags ?? [])],
             preferredSpots: ctx.preferredSpots,
             notes: ctx.slots.unresolved ?? [],
-            candidates: pairs.map(({ venue, survivor }) => ({
+            candidates: shortlisted.map(({ venue, survivor }) => ({
               venueId: venue.id,
               name: venue.name,
               cuisine: venue.cuisine,

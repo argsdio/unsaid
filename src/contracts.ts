@@ -23,6 +23,7 @@ export const OCCASIONS = ["brunch", "lunch", "dinner", "drinks", "coffee"] as co
 export type Occasion = (typeof OCCASIONS)[number];
 
 export type Coords = { lat: number; lng: number };
+export type OpenPeriod = { day: number; open: number; close: number };
 export type Home = Coords & { label: string };
 export type TimeWindow = { start: string; end: string };
 
@@ -103,6 +104,14 @@ export type Venue = {
   // said they felt like. `tags` stays the fuller list: it carries the dietary
   // tags filterVenues treats as hard requirements.
   cuisine?: string;
+  // Everything below comes from Google Places via `npm run venues`, so it is
+  // absent on a hand-written entry and code must cope with that.
+  placeId?: string;
+  rating?: number;
+  ratingCount?: number;
+  // When it is open, as minutes from midnight local, 0 = Sunday. A `close`
+  // smaller than its `open` runs past midnight, which is normal for a bar.
+  hours?: OpenPeriod[];
 };
 
 // One aggregate per survivor, so whose commute it is stays unlabelled.
