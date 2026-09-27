@@ -23,6 +23,7 @@ export type Store = {
   setStatus(planId: string, status: PlanStatus): Promise<void>;
   setPlanDate(planId: string, date: string): Promise<void>;
   setOccasion(planId: string, occasion: Occasion): Promise<void>;
+  setVibe(planId: string, vibe: string[]): Promise<void>;
   setShortlist(planId: string, venueIds: string[]): Promise<void>;
   // One vote per person; voting again replaces the previous choice.
   recordVote(planId: string, userId: string, venueId: string): Promise<void>;
@@ -119,6 +120,9 @@ function memoryStore(): Store {
     },
     async setOccasion(planId, occasion) {
       ensure(planId).occasion = occasion;
+    },
+    async setVibe(planId, vibe) {
+      ensure(planId).vibe = [...vibe];
     },
     async setShortlist(planId, venueIds) {
       ensure(planId).shortlist = [...venueIds];
@@ -290,6 +294,9 @@ async function mongoStore(uri: string): Promise<Store> {
     },
     async setOccasion(planId, occasion) {
       await plans.updateOne({ _id: planId }, { $set: { occasion } });
+    },
+    async setVibe(planId, vibe) {
+      await plans.updateOne({ _id: planId }, { $set: { vibe } });
     },
     async setShortlist(planId, venueIds) {
       await plans.updateOne({ _id: planId }, { $set: { shortlist: venueIds } });

@@ -118,7 +118,7 @@ export type Venue = {
 export type Survivor = { venueId: string; longestTravelMin: number };
 
 // A category, never a person and never a reason -- safe for the backroom screen.
-export type FailedOn = "budget" | "dietary" | "travel" | "occasion";
+export type FailedOn = "budget" | "dietary" | "travel" | "occasion" | "closed";
 export type Rejection = { venueId: string; failedOn: FailedOn };
 
 export type FilterResult = { survivors: Survivor[]; rejected: Rejection[] };
@@ -145,10 +145,11 @@ export type Objection =
   | { kind: "budget"; cap: number }
   | { kind: "dietary"; tag: DietaryTag }
   | { kind: "travel"; maxMin: number }
-  // Not a person's objection at all: the catalogue has too few places for this
-  // kind of outing. Named so the failure message stops blaming whoever has the
-  // tightest budget for the fact that we know two coffee shops.
-  | { kind: "occasion"; occasion: Occasion };
+  // Neither of these is a person's objection: one means the catalogue has too
+  // few places for this kind of outing, the other that nothing is open then.
+  // Named so the failure message stops blaming whoever has the tightest budget.
+  | { kind: "occasion"; occasion: Occasion }
+  | { kind: "closed" };
 
 // Dietary is absent on purpose. A dietary need is not a preference and is never
 // asked to bend.
@@ -254,6 +255,11 @@ export type PlanDoc = {
   // What kind of outing: brunch, dinner, drinks. Drives which venues qualify,
   // what a bare "11" means, the default window, and the copy.
   occasion?: Occasion;
+  // Taste words from the message that started the plan -- "boba", "somewhere
+  // nice", "cheap thai". The organiser is describing the outing for everyone, so
+  // these reach every agent's scoring; without that they only ever reached the
+  // organiser's own agent and could not move a worst-case ranking.
+  vibe?: string[];
   // The day the plan is for, as YYYY-MM-DD. Read from the creator's first
   // message ("dinner friday?"). Without it every plan is silently today, so
   // times and blackouts resolve against the wrong day.

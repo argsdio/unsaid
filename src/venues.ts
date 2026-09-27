@@ -6,6 +6,7 @@ import type {
   MergedConstraints,
   Rejection,
   Survivor,
+  TimeWindow,
   TravelProfile,
   Venue,
 } from "./contracts.ts";
@@ -84,6 +85,43 @@ export function venueById(id: string): Venue | undefined {
 
 // B owns this; A calls it. Check order decides which category a rejection is
 // attributed to, so budget before dietary before travel.
+// Enough of the window to actually sit down. Without a minimum, a place that
+// shuts ten minutes after everyone arrives counts as open.
+const USABLE_MINUTES = 45;
+
+function minutesInto(iso: string): { day: number; at: number } {
+  const d = new Date(iso);
+  return { day: d.getDay(), at: d.getHours() * 60 + d.getMinutes() };
+}
+
+// Absent hours mean unknown, never closed: a fifth of the catalogue is
+// hand-written, and dropping those would quietly shrink the demo to whatever
+// Google happened to match.
+export function isOpenDuring(venue: Venue, window: TimeWindow): boolean {
+  if (!venue.hours?.length) return true;
+  const from = minutesInto(window.start);
+  const to = minutesInto(window.end);
+  const end = to.at > from.at ? to.at : to.at + 24 * 60;
+  const need = Math.min(USABLE_MINUTES, end - from.at);
+
+  for (const period of venue.hours) {
+    // A close earlier than its open runs past midnight, so the same period is
+    // also the tail end of the previous day.
+    const spans = period.close <= period.open
+      ? [{ day: period.day, open: period.open, close: period.close + 24 * 60 }]
+      : [{ day: period.day, open: period.open, close: period.close }];
+    for (const span of spans) {
+      for (const shift of [0, 24 * 60]) {
+        const dayOfSpan = shift === 0 ? span.day : (span.day + 1) % 7;
+        if (dayOfSpan !== from.day) continue;
+        const overlap = Math.min(end, span.close - shift) - Math.max(from.at, span.open - shift);
+        if (overlap >= need) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function filterVenues(
   venues: Venue[],
   merged: MergedConstraints,
@@ -98,6 +136,13 @@ export function filterVenues(
     // attributing it to budget would send people to flex the wrong thing.
     if (!mealsFor(venue).includes(occasion)) {
       rejected.push({ venueId: venue.id, failedOn: "occasion" });
+      continue;
+    }
+
+    // Before money, for the same reason as the occasion: a closed restaurant is
+    // not a budget problem, and nobody can flex their way into it.
+    if (!isOpenDuring(venue, merged.window)) {
+      rejected.push({ venueId: venue.id, failedOn: "closed" });
       continue;
     }
 

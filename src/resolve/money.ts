@@ -27,8 +27,11 @@ export function resolveBudget(raw: string): Slot<number> {
   if (!text) return { raw, value: null, confidence: "low" };
 
   // An explicit currency marker beats everything: in "after 7, an hour away, $30"
-  // the budget is 30, not 7.
-  const marked = text.match(/\$\s*(\d+)/) ?? text.match(/(\d+)\s*(?:dollars|bucks|usd)\b/);
+  // the budget is 30, not 7. Matched against the raw text, because normalise()
+  // strips the dollar sign -- which meant this rule only ever fired for the word
+  // "dollars", and "$5 max" fell through to the bare-number floor below, missed
+  // it, and was answered by the word "broke" instead.
+  const marked = raw.toLowerCase().match(/\$\s*(\d+)/) ?? text.match(/(\d+)\s*(?:dollars|bucks|usd)\b/);
   if (marked?.[1]) {
     const n = Number(marked[1]);
     if (n >= 1 && n <= 5000) return { raw, value: n, confidence: "high" };
@@ -53,6 +56,8 @@ export function resolveBudget(raw: string): Slot<number> {
     return { raw, value: 500, confidence: "high" };
   }
 
+  // A bare number needs a floor: "table for 4" and "the 6 train" are not budgets.
+  // With a dollar sign there is no ambiguity, which is what the rule above is for.
   const single = cleaned.match(/(\d+)/);
   if (single?.[1]) {
     const n = Number(single[1]);

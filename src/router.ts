@@ -8,7 +8,7 @@ import { parseVote, tallyVotes } from "./voting.ts";
 import { classifyMeta } from "./meta.ts";
 import { resolveDate } from "./resolve/date.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
-import { venueById } from "./venues.ts";
+import { tasteWords, venueById } from "./venues.ts";
 import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
 import {
   abandonPlan,
@@ -286,6 +286,14 @@ export async function onDirectText(
     const occasion = resolveOccasion(text);
     await store.setOccasion(plan._id, occasion);
     botLog("plan occasion", { planId: plan._id, from: text, occasion });
+
+    // "boba after class", "somewhere nice" -- the organiser is describing the
+    // outing for everybody, so every agent scores against it.
+    const vibe = tasteWords(text);
+    if (vibe.length) {
+      await store.setVibe(plan._id, vibe);
+      botLog("plan vibe", { planId: plan._id, vibe });
+    }
 
     // "dinner friday?" means Friday. Without this every plan is silently today.
     const when = resolveDate(text);

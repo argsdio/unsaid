@@ -1,7 +1,7 @@
 import type { MergedConstraints } from "../contracts.ts";
 import { mergeConstraints } from "../aggregator.ts";
 import type { Store } from "../db.ts";
-import { venueById } from "../venues.ts";
+import { priceTier, venueById } from "../venues.ts";
 import { DEMO_SAID } from "./fixtures.ts";
 
 export type BackroomState = {
@@ -19,6 +19,8 @@ export type BackroomState = {
       name: string;
       neighborhood: string;
       estCostUSD: number | null;
+      cuisine?: string;
+      price?: string;
     }[];
   }[];
   said: Record<string, string[]>;
@@ -54,6 +56,9 @@ export async function buildState(store: Store, planId: string): Promise<Backroom
         name: venueById(c.venueId)?.name ?? c.venueId,
         neighborhood: venueById(c.venueId)?.neighborhood ?? "",
         estCostUSD: venueById(c.venueId)?.estCostUSD ?? null,
+        ...(venueById(c.venueId)
+          ? { cuisine: venueById(c.venueId)!.cuisine, price: priceTier(venueById(c.venueId)!) }
+          : {}),
       })),
     })),
     said,

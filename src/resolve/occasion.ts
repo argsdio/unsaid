@@ -1,15 +1,25 @@
 import type { Occasion } from "../contracts.ts";
 import { normalise } from "./gazetteer.ts";
 
-// Longest first, so "late lunch" is not read as "lunch" by a shorter rule and
-// "brunch" is never swallowed by "lunch" as a substring.
-const WORDS: Array<[Occasion, string[]]> = [
-  ["brunch", ["brunch", "breakfast", "bfast", "morning"]],
+// Naming the outing beats describing when it is. "coffee tomorrow morning" is
+// coffee, not brunch, and "late lunch" is lunch rather than drinks -- so the
+// explicit nouns are all checked before any time-of-day word.
+const NAMED: Array<[Occasion, string[]]> = [
+  ["brunch", ["brunch", "breakfast", "bfast", "pancakes", "bagels"]],
   // Boba is a coffee-shaped outing: an afternoon, a drink, somewhere cheap.
-  ["coffee", ["coffee", "cafe", "espresso", "tea", "boba", "bubble tea", "matcha", "dessert", "ice cream", "hang out", "study"]],
-  ["drinks", ["drinks", "drink", "cocktails", "bar", "happy hour", "nightcap", "beers"]],
-  ["lunch", ["lunch", "midday", "noon"]],
-  ["dinner", ["dinner", "supper", "eat", "food", "tonight"]],
+  ["coffee", ["coffee", "cafe", "espresso", "boba", "bubble tea", "matcha", "tea", "dessert", "ice cream"]],
+  ["drinks", ["drinks", "drink", "cocktails", "happy hour", "nightcap", "beers", "bar"]],
+  ["lunch", ["lunch"]],
+  ["dinner", ["dinner", "supper"]],
+];
+
+// Weaker signals: only consulted when nothing above was named.
+const IMPLIED: Array<[Occasion, string[]]> = [
+  ["brunch", ["morning", "early"]],
+  ["lunch", ["midday", "noon", "lunchtime"]],
+  ["coffee", ["afternoon", "hang out", "hangout", "study", "catch up"]],
+  ["drinks", ["late", "night out", "nightlife"]],
+  ["dinner", ["eat", "food", "tonight", "evening", "hungry"]],
 ];
 
 // Dinner is the default because it is what the app has always assumed, and
@@ -17,8 +27,10 @@ const WORDS: Array<[Occasion, string[]]> = [
 export function resolveOccasion(text: string, fallback: Occasion = "dinner"): Occasion {
   const t = normalise(text);
   if (!t) return fallback;
-  for (const [occasion, words] of WORDS) {
-    if (words.some((w) => new RegExp(`\\b${w}\\b`).test(t))) return occasion;
+  for (const list of [NAMED, IMPLIED]) {
+    for (const [occasion, words] of list) {
+      if (words.some((w) => new RegExp(`\\b${w}\\b`).test(t))) return occasion;
+    }
   }
   return fallback;
 }

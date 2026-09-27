@@ -21,8 +21,24 @@ const ACCEPT_FLOOR = 0.35;
 const MAX_ROUNDS = 3;
 
 // How far a willing person stretches per round.
-const BUDGET_STEP = 10;
-const TRAVEL_STEP = 15;
+// A flat $10 step is nothing to somebody who said $80 and a tripling to somebody
+// who said $10, which is how a group capped at $10 each was shown a $30 dinner
+// and told it worked for everyone. Steps are a share of what the person said,
+// and the total an agent may concede without asking is capped.
+const STEP_SHARE = { budget: 0.2, travel: 0.25 };
+const MIN_BUDGET_STEP = 5;
+const MIN_TRAVEL_STEP = 15;
+
+// Money and distance are not the same kind of ask. Spending more than you said
+// you could costs you money, so an agent may concede a quarter above a stated
+// cap and no more -- past that it asks. A longer trip costs time you can still
+// refuse: the card names the place before anybody goes, so travel keeps trading.
+const CEILING: Record<"budget" | "travel", number> = { budget: 1.25, travel: Infinity };
+
+function stepFor(kind: "budget" | "travel", current: number): number {
+  const floor = kind === "budget" ? MIN_BUDGET_STEP : MIN_TRAVEL_STEP;
+  return Math.max(floor, Math.round((current * STEP_SHARE[kind]) / 5) * 5);
+}
 
 type Agent = {
   userId: string;
@@ -31,6 +47,24 @@ type Agent = {
   preferredSpots: string[];
   sensitive: RequiredSlot[];
 };
+
+// What each person actually said, before any concession, so a ceiling can be
+// measured against it.
+type Stated = Map<string, { budget: number | null; travel: number | null }>;
+
+function statedCaps(people: Participant[]): Stated {
+  return new Map(
+    people.map((p) => [
+      p.userId,
+      { budget: p.slots.budgetCapUSD?.value ?? null, travel: p.slots.maxTravelMin?.value ?? null },
+    ]),
+  );
+}
+
+function withinCeiling(stated: Stated, userId: string, kind: "budget" | "travel", value: number): boolean {
+  const said = kind === "budget" ? stated.get(userId)?.budget : stated.get(userId)?.travel;
+  return said === null || said === undefined || value <= said * CEILING[kind];
+}
 
 function cap(agent: Agent, slot: "budgetCapUSD" | "maxTravelMin"): number | null {
   return agent.participant.slots[slot]?.value ?? null;
@@ -79,6 +113,7 @@ function describe(objection: Objection | null): string {
   if (objection.kind === "budget") return `budget, capped at $${objection.cap}`;
   if (objection.kind === "travel") return "how far people will travel";
   if (objection.kind === "occasion") return `too few places for ${objection.occasion}`;
+  if (objection.kind === "closed") return "nothing open in the shared window";
   return `a ${objection.tag} requirement`;
 }
 
@@ -143,6 +178,16 @@ function trueBlocker(
   // No catalogue for this kind of outing at all: nobody's constraint is at fault
   // and no amount of flexing helps, so say that instead of naming a person's diet.
   if (!VENUES.some((v) => mealsFor(v).includes(occasion))) return { kind: "occasion", occasion };
+  // Opening hours are the other wall nobody can flex: if the shared window is
+  // the only thing rejecting places, saying "the clash is budget" is a lie.
+  const wideOpen = { ...mergeConstraints(unlimited.map((a) => a.participant), day, occasion) };
+  const openSomewhere = filterVenues(
+    VENUES,
+    { ...wideOpen, window: { start: `${wideOpen.window.start.slice(0, 10)}T00:00:00`, end: `${wideOpen.window.start.slice(0, 10)}T23:59:00` } },
+    travelProfiles(unlimited.map((a) => a.participant)),
+    occasion,
+  );
+  if (openSomewhere.survivors.length > 0) return { kind: "closed" };
   if (survivorCount(undieted, day, occasion) > 0) {
     const tag = mergeConstraints(unlimited.map((a) => a.participant), day, occasion).requiredDietary[0];
     if (tag) return { kind: "dietary", tag };
@@ -157,21 +202,24 @@ function survivorCount(agents: Agent[], day: Date, occasion: Occasion): number {
 }
 
 // One step of relaxation applied to whoever holds the tightest cap, but only if
-// they did not hedge about it. Returns null when nobody is willing.
+// they did not hedge about it and only up to AUTO_CEILING of what they said.
+// Past that an agent has to ask its own human rather than keep trading.
 function relaxedBy(
   agents: Agent[],
   kind: "budget" | "travel",
+  stated: Stated,
 ): { agents: Agent[]; concessions: Concession[] } | null {
   const slot = kind === "budget" ? "budgetCapUSD" : "maxTravelMin";
   const tightest = Math.min(...agents.map((a) => cap(a, slot) ?? Infinity));
   if (!Number.isFinite(tightest)) return null;
 
-  const holders = agents.filter(
-    (a) => (cap(a, slot) ?? Infinity) === tightest && !a.sensitive.includes(slot),
-  );
+  const step = stepFor(kind, tightest);
+  const holders = agents.filter((a) => {
+    if ((cap(a, slot) ?? Infinity) !== tightest || a.sensitive.includes(slot)) return false;
+    return withinCeiling(stated, a.userId, kind, tightest + step);
+  });
   if (holders.length === 0) return null;
 
-  const step = kind === "budget" ? BUDGET_STEP : TRAVEL_STEP;
   const concessions: Concession[] = holders.map((h) =>
     kind === "budget"
       ? { kind: "budget", newCap: (cap(h, slot) ?? 0) + step }
@@ -182,6 +230,23 @@ function relaxedBy(
     agents: agents.map((a) => (ids.has(a.userId) ? flex(a, slot, tightest + step) : a)),
     concessions,
   };
+}
+
+function couldEverHelp(
+  agents: Agent[],
+  kind: "budget" | "travel",
+  day: Date,
+  occasion: Occasion,
+  baseline: number,
+  stated: Stated,
+): boolean {
+  const slot = kind === "budget" ? "budgetCapUSD" : "maxTravelMin";
+  const atCeiling = agents.map((a) => {
+    const said = kind === "budget" ? stated.get(a.userId)?.budget : stated.get(a.userId)?.travel;
+    if (said === null || said === undefined || a.sensitive.includes(slot)) return a;
+    return flex(a, slot, said * CEILING[kind]);
+  });
+  return survivorCount(atCeiling, day, occasion) > baseline;
 }
 
 // Whichever willing relaxation admits the most venues, preferring one that helps
@@ -197,13 +262,19 @@ function bestRelaxation(
   day: Date,
   occasion: Occasion,
   baseline: number,
+  stated: Stated,
 ): { agents: Agent[]; concessions: Concession[]; kind: "budget" | "travel"; gain: number } | null {
   let best: { agents: Agent[]; concessions: Concession[]; kind: "budget" | "travel"; gain: number } | null =
     null;
   for (const kind of ["budget", "travel"] as const) {
-    const relaxed = relaxedBy(agents, kind);
+    const relaxed = relaxedBy(agents, kind, stated);
     if (!relaxed) continue;
     const gain = survivorCount(relaxed.agents, day, occasion) - baseline;
+    // A step that gains nothing is worth taking only if the steps after it would
+    // get somewhere. Checked by jumping the whole way to the ceiling: if even
+    // that admits nothing, this constraint is not what is blocking, and spending
+    // the round on it means never reaching the person who could actually help.
+    if (gain <= 0 && !couldEverHelp(agents, kind, day, occasion, baseline, stated)) continue;
     if (!best || gain > best.gain) {
       best = { agents: relaxed.agents, concessions: relaxed.concessions, kind, gain };
     }
@@ -279,9 +350,17 @@ function rank(survivors: Survivor[], positions: Position[][], limit: number): st
     .map((s) => ({
       venueId: s.venueId,
       worst: Math.min(...positions.map((l) => l.find((p) => p.venueId === s.venueId)?.score ?? 0)),
+      total: positions.reduce((sum, l) => sum + (l.find((p) => p.venueId === s.venueId)?.score ?? 0), 0),
     }))
+    // Worst case first, because that is what makes a pick fair. But most options
+    // tie there, and then the tie should go to the one somebody actually wants:
+    // under worst-case alone, a preference only one person voiced can never move
+    // the ranking at all.
     .sort(
-      (a, b) => b.worst - a.worst || (travel.get(a.venueId) ?? 0) - (travel.get(b.venueId) ?? 0),
+      (a, b) =>
+        b.worst - a.worst ||
+        b.total - a.total ||
+        (travel.get(a.venueId) ?? 0) - (travel.get(b.venueId) ?? 0),
     )
     .slice(0, limit)
     .map((x) => x.venueId);
@@ -302,25 +381,31 @@ function whisperCandidate(
   occasion: Occasion,
   baseline: number,
   asked: string[],
+  stated: Stated,
 ): { userId: string; kind: "budget" | "travel"; newValue: number; question: string } | null {
   for (const kind of ["budget", "travel"] as const) {
     const slot = kind === "budget" ? "budgetCapUSD" : "maxTravelMin";
     const tightest = Math.min(...agents.map((a) => cap(a, slot) ?? Infinity));
     if (!Number.isFinite(tightest)) continue;
 
-    const step = kind === "budget" ? BUDGET_STEP : TRAVEL_STEP;
+    const step = stepFor(kind, tightest);
+    // Either they hedged about it, or their agent has already conceded as far as
+    // it may without asking. Both mean the same thing: the next move is theirs.
     const candidates = agents.filter(
       (a) =>
         (cap(a, slot) ?? Infinity) === tightest &&
-        a.sensitive.includes(slot) &&
-        !asked.includes(a.userId),
+        !asked.includes(a.userId) &&
+        (a.sensitive.includes(slot) || !withinCeiling(stated, a.userId, kind, tightest + step)),
     );
 
     for (const candidate of candidates) {
       const relaxed = agents.map((a) =>
         a.userId === candidate.userId ? flex(a, slot, tightest + step) : a,
       );
-      if (survivorCount(relaxed, day, occasion) - baseline < 0) continue;
+      // A speculative automatic step costs nobody anything, but interrupting a
+      // person privately has to buy something. Asking someone to raise their
+      // budget when an unsatisfiable diet is the real wall helps nothing.
+      if (survivorCount(relaxed, day, occasion) - baseline <= 0) continue;
       const newValue = tightest + step;
       const question =
         kind === "budget"
@@ -351,6 +436,7 @@ async function loadAgents(
   store: Store,
   people: Participant[],
   relaxations: Relaxations,
+  vibe: string[] = [],
 ): Promise<Agent[]> {
   return Promise.all(
     people.map(async (participant) => {
@@ -366,7 +452,7 @@ async function loadAgents(
       return {
         userId: participant.userId,
         participant: { ...participant, slots },
-        tastes: user?.profile.tastes ?? [],
+        tastes: [...(user?.profile.tastes ?? []), ...vibe],
         preferredSpots: user?.profile.preferredSpots ?? [],
         sensitive: participant.slots.sensitive ?? [],
       };
@@ -388,11 +474,15 @@ export async function negotiate(
   people: Participant[],
   day: Date = new Date(),
 ): Promise<NegotiationResult> {
-  const occasion = (await store.getPlan(planId))?.occasion ?? "dinner";
+  const plan = await store.getPlan(planId);
+  const occasion = plan?.occasion ?? "dinner";
   const saved = await store.getNegotiation(planId);
   const relaxations: Relaxations = { ...(saved?.relaxations ?? {}) };
   const askedAlready = [...(saved?.asked ?? [])];
-  let agents = await loadAgents(store, people, relaxations);
+  // Measured against what people said, not against the already-relaxed values a
+  // resumed negotiation loads, or the ceiling would drift up every round.
+  const stated = statedCaps(people);
+  let agents = await loadAgents(store, people, relaxations, plan?.vibe ?? []);
 
   const rounds: RoundLog[] = [];
   let lastObjection: Objection | null = null;
@@ -432,7 +522,7 @@ export async function negotiate(
     }
 
     // Somebody willing? Take the relaxation that admits the most venues.
-    const relaxation = bestRelaxation(agents, day, occasion, filtered.survivors.length);
+    const relaxation = bestRelaxation(agents, day, occasion, filtered.survivors.length, stated);
     if (relaxation) {
       agents = relaxation.agents;
       for (const a of agents) {
@@ -459,9 +549,27 @@ export async function negotiate(
       continue;
     }
 
-    // Nobody willing. If the only person who could help hedged about it, ask them
-    // privately rather than either pushing them silently or giving up.
-    const whisper = whisperCandidate(agents, day, occasion, filtered.survivors.length, askedAlready);
+    // Options exist, they are just nobody's favourite. Asking somebody to spend
+    // more when there is already something everyone can afford is the wrong
+    // trade: settle on the best compromise instead. The whisper is for an empty
+    // table, where one person really is the only way anything happens.
+    if (filtered.survivors.length > 0) {
+      const shortlist = rank(filtered.survivors, positions, SHORTLIST);
+      rounds.push(
+        toRoundLog(
+          planId, round, filtered.survivors, filtered.rejected, positions,
+          shuffle(objection ? [objection] : []), [],
+          `${narrate(round, filtered.survivors.length, shortlist[0], objection, [])} Nobody's first choice, so the closest compromise it is.`,
+          shortlist[0],
+        ),
+      );
+      return done({ status: "settled", shortlist, merged, rounds });
+    }
+
+    // Nobody willing and nothing on the table. If the only person who could help
+    // hedged about it, ask them privately rather than pushing them silently or
+    // giving up.
+    const whisper = whisperCandidate(agents, day, occasion, filtered.survivors.length, askedAlready, stated);
     if (whisper) {
       rounds.push(
         toRoundLog(

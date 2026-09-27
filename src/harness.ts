@@ -12,7 +12,7 @@ import { resolveBlackouts } from "./resolve/blackout.ts";
 import { defaultWindow, resolveWindow } from "./resolve/time.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
 import { nothingFits, whenLabel } from "./orchestrator/messages.ts";
-import { VENUES, filterVenues, findVenueByName, matchesVibe, priceTier, venueById } from "./venues.ts";
+import { VENUES, filterVenues, findVenueByName, isOpenDuring, matchesVibe, priceTier, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
@@ -243,6 +243,12 @@ async function main(): Promise<void> {
 
   check("'cheap' resolves to a number", typeof resolveBudget("cheap").value === "number");
   check("'$25 tops' resolves to 25", resolveBudget("$25 tops, kinda broke rn").value === 25);
+  check(
+    "a small explicit amount beats a word like 'broke'",
+    resolveBudget("$4 max, kinda broke rn").value === 4 && resolveBudget("$6").value === 6,
+    `(${resolveBudget("$4 max, kinda broke rn").value})`,
+  );
+  check("but a bare number that small is not a budget", resolveBudget("table for 4").value === null);
 
   // Everything below runs against the REAL store — Atlas when MONGODB_URI is
   // set — so the Mongo implementation is actually exercised. Ids are scoped to
@@ -420,6 +426,20 @@ async function main(): Promise<void> {
   );
   check("an opening message with no occasion is dinner", resolveOccasion("are we doing something friday") === "dinner");
   check(
+    "naming the outing beats describing when it is",
+    resolveOccasion("coffee tomorrow morning") === "coffee" &&
+      resolveOccasion("late lunch friday") === "lunch" &&
+      resolveOccasion("dinner tonight") === "dinner" &&
+      resolveOccasion("drinks tonight") === "drinks",
+    resolveOccasion("coffee tomorrow morning"),
+  );
+  check(
+    "and a time of day still counts when nothing is named",
+    resolveOccasion("something saturday morning") === "brunch" &&
+      resolveOccasion("wanna hang out sunday") === "coffee" &&
+      resolveOccasion("im hungry, food friday?") === "dinner",
+  );
+  check(
     "boba, matcha and dessert are a coffee outing",
     ["boba tmrw?", "bubble tea after class", "matcha run", "dessert somewhere"].every(
       (t) => resolveOccasion(t) === "coffee",
@@ -442,12 +462,42 @@ async function main(): Promise<void> {
   };
   const openProfiles = travelProfiles([{ userId: "anyone", slots: {} }]);
   const atBrunch = filterVenues(VENUES, brunchMerged, openProfiles, "brunch");
-  const atDinner = filterVenues(VENUES, brunchMerged, openProfiles, "dinner");
+  // The property, not a count: this venue is for dinner only, so at brunch it is
+  // rejected, and rejected on the occasion rather than blamed on somebody's cap.
+  const dinnerOnly = VENUES.find((v) => v.meals?.length === 1 && v.meals[0] === "dinner");
   check(
     "a dinner-only venue is rejected at brunch, and on occasion not budget",
-    atBrunch.rejected.some((r) => r.failedOn === "occasion") &&
-      atBrunch.survivors.length < atDinner.survivors.length,
-    `(${atBrunch.survivors.length} brunch vs ${atDinner.survivors.length} dinner)`,
+    dinnerOnly !== undefined &&
+      atBrunch.rejected.find((r) => r.venueId === dinnerOnly.id)?.failedOn === "occasion",
+    dinnerOnly?.name ?? "no dinner-only venue in the catalogue",
+  );
+
+  // Opening hours. A fifth of the catalogue is hand-written with no hours at
+  // all, so unknown has to mean allowed or the demo silently shrinks to whatever
+  // Google matched.
+  const sunday = "2026-10-04";
+  const brunchWindow = { start: `${sunday}T11:00:00`, end: `${sunday}T13:00:00` };
+  const lateWindow = { start: `${sunday}T01:00:00`, end: `${sunday}T02:00:00` };
+  const dinnerHours = { ...VENUES[0]!, hours: [{ day: 0, open: 17 * 60, close: 23 * 60 }] };
+  const allDay = { ...VENUES[0]!, hours: [{ day: 0, open: 8 * 60, close: 22 * 60 }] };
+  const lateBar = { ...VENUES[0]!, hours: [{ day: 6, open: 19 * 60, close: 3 * 60 }] };
+  check(
+    "a place that opens at five is not a brunch option",
+    !isOpenDuring(dinnerHours, brunchWindow) && isOpenDuring(allDay, brunchWindow),
+  );
+  check("a venue with no hours is allowed, not assumed closed", isOpenDuring(VENUES[0]!, brunchWindow));
+  check(
+    "a bar open till three is open at one in the morning",
+    isOpenDuring(lateBar, lateWindow),
+  );
+  check(
+    "closing time is a rejection of its own, not a budget problem",
+    filterVenues([dinnerHours], { ...brunchMerged, window: brunchWindow }, openProfiles, dinnerHours.meals![0]!)
+      .rejected[0]?.failedOn === "closed",
+  );
+  check(
+    "and it is reported as the time, with nobody asked to flex",
+    /open then/i.test(nothingFits(["closed"])) && !/budget/i.test(nothingFits(["closed"])),
   );
   check(
     "every occasion still has somewhere to go",
@@ -606,12 +656,14 @@ async function main(): Promise<void> {
     allMoves.every((m) => !("agent" in m) && !("userId" in m)),
   );
 
+  // Layer 4. The hedged person's cap is the only thing standing between the group
+  // and somewhere to go, so they get asked privately -- once -- rather than
+  // pushed silently or given up on. Same neighbourhood and no dietary needs, so
+  // money is unambiguously the wall.
   const stuck = await asPeople([
-    ["s1", { homeRaw: "east village", budgetRaw: "$9 max", dietaryRaw: "vegan", windowRaw: "after 7", travelRaw: "10 min tops" }],
-    ["s2", { homeRaw: "flushing", budgetRaw: "$10 tops", dietaryRaw: "halal", windowRaw: "after 7", travelRaw: "10 min max" }],
+    ["s1", { homeRaw: "east village", budgetRaw: "$5 tops, kinda broke rn", dietaryRaw: "i eat everything", windowRaw: "after 7", travelRaw: "1 hr" }],
+    ["s2", { homeRaw: "east village", budgetRaw: "$60", dietaryRaw: "i eat everything", windowRaw: "after 7", travelRaw: "1 hr" }],
   ]);
-  // Layer 4. When the only person who could help is the one who hedged, they get
-  // asked privately -- once -- rather than pushed silently or given up on.
   const stuckRun = await negotiate(negStore, "neg-s", stuck, day);
   check("nobody willing means somebody gets asked privately", stuckRun.status === "waiting");
   check(
@@ -643,6 +695,47 @@ async function main(): Promise<void> {
   check(
     "and nobody is asked twice, however much it would help",
     new Set(declined.askedOf).size === declined.askedOf.length && declined.askedOf.length > 0,
+  );
+
+  // What the organiser asked for has to reach the pick. Under worst-case ranking
+  // alone it could not: only one person said "boba", so their preference was
+  // never the minimum and never moved anything.
+  const bobaPlan = "neg-vibe";
+  await negStore.setOccasion(bobaPlan, "coffee");
+  await negStore.setVibe(bobaPlan, ["boba"]);
+  const bobaPeople = await asPeople([
+    ["v1", { homeRaw: "east village", budgetRaw: "$15", dietaryRaw: "i eat everything", windowRaw: "4pm", travelRaw: "30 min" }],
+    ["v2", { homeRaw: "east village", budgetRaw: "$15", dietaryRaw: "i eat everything", windowRaw: "4pm", travelRaw: "30 min" }],
+  ]);
+  const bobaRun = await negotiate(negStore, bobaPlan, bobaPeople, day);
+  const bobaTop = bobaRun.status === "settled" ? venueById(bobaRun.shortlist[0]!) : undefined;
+  check(
+    "asking for boba gets boba, not just any cheap cafe",
+    bobaTop !== undefined && (bobaTop.cuisine === "boba" || bobaTop.tags.includes("boba")),
+    bobaTop ? `${bobaTop.name} (${bobaTop.cuisine})` : bobaRun.status,
+  );
+
+  // Nobody is interrupted for nothing. No venue in the catalogue is both kosher
+  // and vegan, and no amount of money or travel changes that, so this fails
+  // without asking anyone to flex anything -- the previous version burned all
+  // three rounds on travel steps that admitted nothing and then asked somebody
+  // to spend more. (It used to use vegan and halal, which the Places catalogue
+  // can now satisfy: Mamoun's is both.)
+  const unsatisfiable = await asPeople([
+    ["u1", { homeRaw: "east village", budgetRaw: "$40", dietaryRaw: "vegan", windowRaw: "after 7", travelRaw: "1 hr" }],
+    ["u2", { homeRaw: "east village", budgetRaw: "$40", dietaryRaw: "kosher", windowRaw: "after 7", travelRaw: "1 hr" }],
+  ]);
+  const unsatisfiableRun = await negotiate(negStore, "neg-u", unsatisfiable, day);
+  check(
+    "an unsatisfiable diet fails without asking anybody to flex",
+    unsatisfiableRun.status === "failed" &&
+      unsatisfiableRun.rounds.every((r) => (r.concessions ?? []).length === 0),
+    unsatisfiableRun.status === "failed" ? JSON.stringify(unsatisfiableRun.binding) : unsatisfiableRun.status,
+  );
+  check(
+    "and it says so in one round rather than three",
+    unsatisfiableRun.rounds.length === 1,
+    `(${unsatisfiableRun.rounds.length})`,
   );
 
   // A group whose only wall is money, so agreeing can actually help. `stuck`
@@ -1067,6 +1160,14 @@ async function main(): Promise<void> {
     "candidates are joined to venue names",
     (first?.candidates ?? []).length > 0 &&
       (first?.candidates ?? []).every((c) => venueById(c.venueId)?.name === c.name),
+  );
+  check(
+    "the projector caps how many survivors it draws",
+    /SURVIVORS_SHOWN/.test(readFileSync(new URL("./backroom/page.html", import.meta.url), "utf8")),
+  );
+  check(
+    "and candidates carry a cuisine and a price tier for the screen",
+    (first?.candidates ?? []).filter((c) => c.passed).every((c) => typeof c.price === "string"),
   );
   check(
     "rejections carry a category and no reason text",

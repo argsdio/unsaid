@@ -63,6 +63,7 @@ const AREA: Record<FailedOn | "time", string> = {
   dietary: "diet",
   travel: "how far people can go",
   occasion: "what kind of outing this is",
+  closed: "opening hours",
   time: "time windows",
 };
 
@@ -71,6 +72,12 @@ export function nothingFits(areas: Array<FailedOn | "time">, occasion: Occasion 
   // "the clash is what kind of outing this is" is true but useless. When the
   // occasion is the wall, nobody has to flex -- the group has to pick something
   // else to do, which is a different ask.
+  if (unique.length === 1 && unique[0] === "closed") {
+    return [
+      `Nothing that works for everyone is open then.`,
+      `Text me a different time and the host can send go again.`,
+    ].join("\n");
+  }
   if (unique.length === 1 && unique[0] === "occasion") {
     return [
       `I could not find anywhere that works for ${occasion} within everyone's limits.`,

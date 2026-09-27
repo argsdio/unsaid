@@ -96,6 +96,9 @@
   // of eliminations get struck out for the visible-crossing-out beat, and the
   // rest collapse into one counted line.
   const CROSSOUTS_SHOWN = 6;
+  // The catalogue is Places-sourced now: a loose budget leaves hundreds of
+  // survivors, and 300 rows on a projector is a wall of text nobody reads.
+  const SURVIVORS_SHOWN = 10;
 
   // The round-by-round argument. The candidate rows below show only the latest
   // round, so without this the multi-round negotiation is invisible.
@@ -117,13 +120,13 @@
     const failed = round.candidates.filter((c) => !c.passed);
     const best = passed[0];
 
-    const rows = passed.map((c) => {
+    const rows = passed.slice(0, SURVIVORS_SHOWN).map((c) => {
       const bars = c.scores
         .map((s) => `<div class="bar" style="height:${Math.max(3, s * 26)}px"></div>`)
         .join("");
       return `<div class="row ${best && c.venueId === best.venueId ? "winner" : ""}">
         <span class="name">${esc(c.name)}</span>
-        <span class="hood">${esc(c.neighborhood)}</span>
+        <span class="hood">${esc([c.cuisine, c.neighborhood].filter(Boolean).join(" · "))}</span>
         <span class="cost">${c.estCostUSD === null ? "" : "$" + c.estCostUSD}</span>
         <div class="bars">${bars}</div>
         <span class="worst">${worstOf(c).toFixed(2)}</span>
@@ -132,7 +135,7 @@
 
     const crossouts = failed.slice(0, CROSSOUTS_SHOWN).map((c) => `<div class="row out">
         <span class="name">${esc(c.name)}</span>
-        <span class="hood">${esc(c.neighborhood)}</span>
+        <span class="hood">${esc([c.cuisine, c.neighborhood].filter(Boolean).join(" · "))}</span>
         <span class="cost">${c.estCostUSD === null ? "" : "$" + c.estCostUSD}</span>
         <span class="why">reason private — ${WHY[c.failedOn] || "filtered"}</span>
       </div>`);
@@ -148,7 +151,9 @@
       summary = `<div class="summary">+${remaining} more eliminated · ${parts.join(" · ")}</div>`;
     }
 
-    return rows.join("") + (crossouts.length ? `<div class="divider"></div>` : "") +
+    const hiddenPassed = passed.length - rows.length;
+    const more = hiddenPassed > 0 ? `<div class="summary">+${hiddenPassed} more that also work</div>` : "";
+    return rows.join("") + more + (crossouts.length ? `<div class="divider"></div>` : "") +
       crossouts.join("") + summary;
   }
 
