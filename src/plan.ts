@@ -274,10 +274,12 @@ export async function saveFavorite(store: Store, userId: string, place: string):
   return `I don't have that exact spot in the list, but I noted “${label}” as a taste. Keep answering the last question when you're ready.`;
 }
 
-export function shareText(joinCode: string): string {
+// The pasted invite says what it is for. Without the occasion and the day,
+// everybody else was being asked their budget for a plan they could not see.
+export function shareText(joinCode: string, what?: string): string {
   return [
     `You're the host. Paste this in your group chat (Unsaid is not in that chat):`,
     "",
-    `Text your Unsaid: JOIN ${joinCode}`,
+    what ? `${what} — text your Unsaid: JOIN ${joinCode}` : `Text your Unsaid: JOIN ${joinCode}`,
   ].join("\n");
 }

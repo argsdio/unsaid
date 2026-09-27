@@ -1,5 +1,5 @@
 import { type Message, type Space, option, poll } from "spectrum-ts";
-import type { HandleDMResult, Occasion } from "./contracts.ts";
+import type { HandleDMResult, Occasion, Venue } from "./contracts.ts";
 import type { PlanDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
 import { fanOut, sendTo, type SpaceLookup } from "./orchestrator/fanout.ts";
@@ -8,8 +8,10 @@ import { parseVote, tallyVotes } from "./voting.ts";
 import { classifyMeta } from "./meta.ts";
 import { resolveDate } from "./resolve/date.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
-import { tasteWords, venueById } from "./venues.ts";
-import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
+import { resolveHome } from "./resolve/location.ts";
+import { grokGeocoder } from "./resolve/geocode.ts";
+import { tasteWords, transitLink, venueById } from "./venues.ts";
+import { everyoneIn, planIntro, settledCard, waitingOnOthers, whenLabel } from "./orchestrator/messages.ts";
 import {
   abandonPlan,
   activePlan,
@@ -166,7 +168,10 @@ async function deliverOutcome(
     return;
   }
 
-  if (outcome.shortlist.length > 1) await store.setShortlist(plan._id, outcome.shortlist);
+  // Stored even when there is only one option: voting is gated on more than one
+  // elsewhere, but without this a single-option plan settled by a 👍 had no venue
+  // recorded anywhere and could not say where it was.
+  await store.setShortlist(plan._id, outcome.shortlist, outcome.time);
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
@@ -235,7 +240,7 @@ export async function onDirectText(
       userId,
       dm,
       "join: attached + handleDM",
-      `You're in (${joined.plan.joinCode}).\n\n`,
+      `You're in (${joined.plan.joinCode}). ${planIntro(joined.plan)}\n\n`,
       joined.plan.occasion,
     );
     botLog("join", { userId, planId: joined.plan._id, joinCode: joined.plan.joinCode });
@@ -299,10 +304,11 @@ export async function onDirectText(
 
     // "dinner friday?" means Friday. Without this every plan is silently today.
     const when = resolveDate(text);
+    let planDate: string | undefined;
     if (when) {
-      const iso = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}-${String(when.getDate()).padStart(2, "0")}`;
-      await store.setPlanDate(plan._id, iso);
-      botLog("plan date", { planId: plan._id, from: text, date: iso });
+      planDate = `${when.getFullYear()}-${String(when.getMonth() + 1).padStart(2, "0")}-${String(when.getDate()).padStart(2, "0")}`;
+      await store.setPlanDate(plan._id, planDate);
+      botLog("plan date", { planId: plan._id, from: text, date: planDate });
     }
     const dm = await handleDM({ planId: plan._id, userId, text }, store);
     await sendHandleDM(
@@ -310,7 +316,7 @@ export async function onDirectText(
       userId,
       dm,
       "create: new plan + handleDM",
-      `${shareText(plan.joinCode)}\n\n`,
+      `${shareText(plan.joinCode, whenLabel(occasion, planDate))}\n\n`,
       occasion,
     );
     botLog("create", { userId, planId: plan._id, joinCode: plan.joinCode });
@@ -342,6 +348,22 @@ export async function onDirectText(
   }
 
   if (current.status === "confirmed") {
+    // The settled card invites an address for door-to-door directions, so that
+    // has to do something. Anything else still gets the canned line.
+    const venue = current.chosen ? venueById(current.chosen.venueId) : undefined;
+    const sharper = venue ? await resolveHome(text, grokGeocoder()) : { value: null };
+    if (venue && sharper.value) {
+      await store.setSlots(current._id, userId, {
+        ...(await store.getSlots(current._id, userId)),
+        home: { raw: text, value: sharper.value, confidence: "high" },
+      });
+      await send(
+        space,
+        [`Got it — ${sharper.value.label}.`, "", `Transit to ${venue.name}: ${transitLink(venue, sharper.value)}`].join("\n"),
+        "confirmed: sharper directions",
+      );
+      return;
+    }
     await send(space, "You're all set — everyone's already in.", "inbound ignored: status confirmed");
     return;
   }
@@ -444,6 +466,35 @@ function bumpNudge(planId: string, userId: string): number {
   return next;
 }
 
+// Everyone gets the same facts and their own directions: fanOut sends one
+// identical message, so the transit link has to be built per person.
+async function announceSettled(
+  store: Store,
+  lookup: SpaceLookup,
+  plan: PlanDoc,
+  venue: Venue,
+  tally: string | undefined,
+  from: { userId: string; space: Space },
+): Promise<{ sent: number; failed: number }> {
+  const time = plan.proposedTime;
+  await store.setChosen(plan._id, {
+    venueId: venue.id,
+    time: time ?? new Date().toISOString(),
+    estCostUSD: venue.estCostUSD,
+  });
+
+  let sent = 0;
+  let failed = 0;
+  for (const userId of plan.participants) {
+    const home = (await store.getSlots(plan._id, userId)).home?.value ?? null;
+    const card = settledCard(venue, { time, occasion: plan.occasion, date: plan.date, tally, from: home });
+    const ok = await sendTo(lookup, spacesFor(plan), userId, card, from);
+    if (ok) sent += 1;
+    else failed += 1;
+  }
+  return { sent, failed };
+}
+
 async function castVote(
   space: Space,
   store: Store,
@@ -502,13 +553,7 @@ async function castVote(
   await store.setStatus(plan._id, "confirmed");
   const settled = (await store.getPlan(plan._id)) ?? latest;
   const tally = top === need ? "Unanimous." : `${top} of ${need} votes.`;
-  const result = await fanOut(
-    lookup,
-    settled,
-    spacesFor(settled),
-    `Settled: ${venue.name} (${venue.neighborhood}) · about $${venue.estCostUSD}. ${tally}`,
-    { userId, space },
-  );
+  const result = await announceSettled(store, lookup, settled, venue, tally, { userId, space });
   botLog("vote: settled", { winner, counts, ...result });
 }
 
@@ -550,10 +595,15 @@ async function onConfirm(
 
   await store.setStatus(plan._id, "confirmed");
   const latest = (await store.getPlan(plan._id)) ?? plan;
-  await fanOut(lookup, latest, spacesFor(latest), everyoneIn(cardFor(plan._id)), {
-    userId,
-    space,
-  });
+  // A 👍 on a single-option card settles it as surely as a vote does, so it gets
+  // the same address and directions rather than "Everyone's in."
+  const top = (latest.shortlist ?? [])[0] ?? latest.chosen?.venueId;
+  const venue = top ? venueById(top) : undefined;
+  if (venue) {
+    await announceSettled(store, lookup, latest, venue, "Everyone's in.", { userId, space });
+  } else {
+    await fanOut(lookup, latest, spacesFor(latest), everyoneIn(cardFor(plan._id)), { userId, space });
+  }
 }
 
 function reactionEmoji(message: Message): string | null {

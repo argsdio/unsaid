@@ -1,4 +1,6 @@
 process.env.UNSAID_QUIET ??= "1";
+// Same keys the real app runs with, so the geocoder and Grok are in play.
+import "dotenv/config";
 import { openStore } from "../src/db.ts";
 import { routeMessage } from "../src/router.ts";
 
@@ -64,8 +66,9 @@ const SCENARIOS: Script[] = [
     opening: "dinner friday", a: ANSWERS.vegan, b: ANSWERS.kosher, then: ["go"],
   },
   {
-    title: "Two people vote — the winner goes out to everyone",
-    opening: "dinner friday", a: ANSWERS.standard, b: ANSWERS.standard, then: ["go", "2", "B:2", "status"],
+    title: "Two people vote — the winner goes out with directions for each of them",
+    opening: "dinner friday", a: ANSWERS.standard, b: ANSWERS.standard,
+    then: ["go", "2", "B:2", "B:im at 60th and lex actually", "status"],
   },
 ];
 
@@ -103,11 +106,15 @@ async function play(script: Script, n: number): Promise<void> {
   };
 
   console.log(`\n━━━ ${n}. ${script.title}`);
+  show = n === 1; // the first scenario shows the invite and the join in full
   await talk(A, script.opening);
+  show = false;
   for (const t of script.a) await talk(A, t);
   const planId = (await store.getUser(A))!.activePlanId!;
   const joinCode = (await store.getPlan(planId))!.joinCode;
+  show = n === 1;
   await talk(B, `JOIN ${joinCode}`);
+  show = false;
   for (const t of script.b) await talk(B, t);
 
   show = true;

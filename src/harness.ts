@@ -11,8 +11,8 @@ import { extract, extractOffline } from "./agent/extract.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
 import { defaultWindow, resolveWindow } from "./resolve/time.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
-import { nothingFits, whenLabel } from "./orchestrator/messages.ts";
-import { VENUES, filterVenues, findVenueByName, isOpenDuring, matchesVibe, priceTier, venueById } from "./venues.ts";
+import { nothingFits, planIntro, settledCard, whenLabel } from "./orchestrator/messages.ts";
+import { VENUES, filterVenues, findVenueByName, isOpenDuring, mapsLink, matchesVibe, priceTier, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
 import { openStore } from "./db.ts";
@@ -521,6 +521,27 @@ async function main(): Promise<void> {
     "other failures still name a constraint to flex",
     /flex/i.test(nothingFits(["budget"])) && /diet/i.test(nothingFits(["dietary"])),
   );
+  const someVenue = VENUES.find((v) => v.placeId) ?? VENUES[0]!;
+  check(
+    "the plan intro names the outing and what was asked for",
+    /brunch/i.test(planIntro({ occasion: "brunch", date: "2026-10-04", vibe: ["brunch", "boba"] })) &&
+      /boba/i.test(planIntro({ occasion: "brunch", date: "2026-10-04", vibe: ["brunch", "boba"] })),
+    planIntro({ occasion: "brunch", date: "2026-10-04", vibe: ["brunch", "boba"] }),
+  );
+  check(
+    "a precise address gets no nudge to send one",
+    /door-to-door/.test(
+      settledCard(someVenue, { from: { lat: 40.73, lng: -73.99, label: "East Village" } }),
+    ) &&
+      !/door-to-door/.test(
+        settledCard(someVenue, { from: { lat: 40.73, lng: -73.99, label: "250 Mercer St" } }),
+      ),
+  );
+  check(
+    "a venue with no placeId still gets a usable map link",
+    mapsLink({ ...someVenue, placeId: undefined }).includes("maps/search"),
+  );
+
   check(
     "the card names the occasion, not the time of day it isn't",
     whenLabel("brunch", "2026-10-04") === "Sunday brunch" && whenLabel("dinner", "2026-10-02") === "Friday dinner",
@@ -1258,8 +1279,27 @@ async function main(): Promise<void> {
     await talk(A, "go");
     const asked = inbox[A]!.at(-1) ?? "";
     await talk(A, answer);
+    const afterAnswer = (await store.getPlan(planId))!;
+    // Carry on to the end when there is something to vote on, so the settled
+    // card is exercised too.
+    if (afterAnswer.status === "proposed") {
+      // More than one option is a vote; a single option is settled with a 👍.
+      const pick = (afterAnswer.shortlist ?? []).length > 1 ? "1" : "yes";
+      await talk(A, pick);
+      await talk(B, pick);
+    }
     const plan = (await store.getPlan(planId))!;
-    const result = { asked, replied: inbox[A]!.at(-1) ?? "", status: plan.status, shortlist: plan.shortlist ?? [] };
+    const result = {
+      asked,
+      replied: inbox[A]!.at(-1) ?? "",
+      status: afterAnswer.status,
+      shortlist: afterAnswer.shortlist ?? [],
+      settled: plan.status,
+      chosen: plan.chosen,
+      card: inbox[B]!.at(-1) ?? "",
+      joined: inbox[B]![0] ?? "",
+      invite: inbox[A]![0] ?? "",
+    };
     await store.close();
     return result;
   };
@@ -1275,6 +1315,31 @@ async function main(): Promise<void> {
     saidYes.status === "proposed" && saidYes.shortlist.length > 0,
     `${saidYes.status} · ${saidYes.shortlist.length} options`,
   );
+  // What the organiser decided has to reach everybody else. Until now the joiner
+  // was asked their budget for a plan they could not see.
+  check(
+    "the pasted invite says what it is for",
+    /dinner/i.test(saidYes.invite) && /JOIN/.test(saidYes.invite),
+    saidYes.invite.split("\n").at(-1) ?? "",
+  );
+  check(
+    "and the joiner is told the plan when they join",
+    /the plan is/i.test(saidYes.joined) && /dinner/i.test(saidYes.joined),
+    saidYes.joined.split("\n")[0] ?? "",
+  );
+  check(
+    "settling records the pick, which nothing used to write",
+    saidYes.settled === "confirmed" && typeof saidYes.chosen?.venueId === "string",
+    `${saidYes.settled} · ${saidYes.chosen?.venueId ?? "none"}`,
+  );
+  check(
+    "and the settled card carries a map and transit from where that person is",
+    /maps\.google\.com|google\.com\/maps/.test(saidYes.card) &&
+      /travelmode=transit/.test(saidYes.card) &&
+      /origin=/.test(saidYes.card),
+    saidYes.card.split("\n").at(-2) ?? "",
+  );
+
   const saidNo = await drive("sorry, cant");
   check(
     "declining ends somewhere rather than hanging",

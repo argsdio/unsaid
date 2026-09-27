@@ -10,7 +10,7 @@ export type NegotiateOutcome =
   // A shortlist of up to three. `poll` is the same options as a Spectrum poll
   // payload, ready for space.send(poll(title, ...options.map(option))) when
   // fan-out is upgraded to send content rather than a string.
-  | { ok: true; text: string; shortlist: string[]; poll?: { title: string; options: string[] } }
+  | { ok: true; text: string; shortlist: string[]; time: string; poll?: { title: string; options: string[] } }
   | { ok: false; text: string }
   // Paused: one person is being asked privately whether they can flex.
   | { ok: false; ask: { userId: string; question: string } };
@@ -95,6 +95,7 @@ async function toOutcome(
     return {
       ok: true,
       shortlist: result.shortlist,
+      time,
       text: planCard(top, { venueId: top.id, time, estCostUSD: top.estCostUSD }, plan.occasion, plan.date),
     };
   }
@@ -113,6 +114,7 @@ async function toOutcome(
   return {
     ok: true,
     shortlist: result.shortlist,
+    time,
     poll: {
       title: `${when} at ${time} — which one?`,
       // Price in the label so the native poll carries the same information as

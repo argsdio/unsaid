@@ -1,5 +1,6 @@
 import { type Collection, MongoClient } from "mongodb";
 import type {
+  Candidate,
   Occasion,
   PlanDoc,
   PlanStatus,
@@ -24,7 +25,8 @@ export type Store = {
   setPlanDate(planId: string, date: string): Promise<void>;
   setOccasion(planId: string, occasion: Occasion): Promise<void>;
   setVibe(planId: string, vibe: string[]): Promise<void>;
-  setShortlist(planId: string, venueIds: string[]): Promise<void>;
+  setShortlist(planId: string, venueIds: string[], proposedTime?: string): Promise<void>;
+  setChosen(planId: string, chosen: Candidate): Promise<void>;
   // One vote per person; voting again replaces the previous choice.
   recordVote(planId: string, userId: string, venueId: string): Promise<void>;
   // Un-tapping an option on a native poll removes the vote entirely, which is
@@ -102,11 +104,16 @@ function memoryStore(): Store {
       plans.set(plan._id, { ...plan });
       return true;
     },
+    // Copies, not the stored objects. Mongo returns a fresh document every read,
+    // and handing out live references let a caller's snapshot change underneath
+    // it -- a plan read as `proposed` became `confirmed` in the reader's hand.
     async getPlan(planId) {
-      return plans.get(planId) ?? null;
+      const plan = plans.get(planId);
+      return plan ? structuredClone(plan) : null;
     },
     async getPlanByJoinCode(code) {
-      return findByCode(code);
+      const plan = findByCode(code);
+      return plan ? structuredClone(plan) : null;
     },
     async addParticipant(planId, userId) {
       const plan = ensure(planId);
@@ -124,8 +131,12 @@ function memoryStore(): Store {
     async setVibe(planId, vibe) {
       ensure(planId).vibe = [...vibe];
     },
-    async setShortlist(planId, venueIds) {
+    async setShortlist(planId, venueIds, proposedTime) {
       ensure(planId).shortlist = [...venueIds];
+      if (proposedTime) ensure(planId).proposedTime = proposedTime;
+    },
+    async setChosen(planId, chosen) {
+      ensure(planId).chosen = { ...chosen };
     },
     async recordVote(planId, userId, venueId) {
       const plan = ensure(planId);
@@ -161,10 +172,12 @@ function memoryStore(): Store {
       });
     },
     async getSlots(planId, userId) {
-      return plans.get(planId)?.slots[userId] ?? {};
+      const slots = plans.get(planId)?.slots[userId];
+      return slots ? structuredClone(slots) : {};
     },
     async getAllSlots(planId) {
-      return plans.get(planId)?.slots ?? {};
+      const all = plans.get(planId)?.slots;
+      return all ? structuredClone(all) : {};
     },
     async setSlots(planId, userId, value) {
       ensure(planId).slots[userId] = value;
@@ -177,7 +190,8 @@ function memoryStore(): Store {
       return messages.get(`${planId}:${userId}`) ?? [];
     },
     async getUser(userId) {
-      return users.get(userId) ?? null;
+      const user = users.get(userId);
+      return user ? structuredClone(user) : null;
     },
     async setActivePlan(userId, planId) {
       const existing = users.get(userId);
@@ -221,7 +235,8 @@ function memoryStore(): Store {
       negotiations.set(state.planId, state);
     },
     async getNegotiation(planId) {
-      return negotiations.get(planId) ?? null;
+      const saved = negotiations.get(planId);
+      return saved ? structuredClone(saved) : null;
     },
     async clearNegotiation(planId) {
       negotiations.delete(planId);
@@ -298,8 +313,14 @@ async function mongoStore(uri: string): Promise<Store> {
     async setVibe(planId, vibe) {
       await plans.updateOne({ _id: planId }, { $set: { vibe } });
     },
-    async setShortlist(planId, venueIds) {
-      await plans.updateOne({ _id: planId }, { $set: { shortlist: venueIds } });
+    async setShortlist(planId, venueIds, proposedTime) {
+      await plans.updateOne(
+        { _id: planId },
+        { $set: proposedTime ? { shortlist: venueIds, proposedTime } : { shortlist: venueIds } },
+      );
+    },
+    async setChosen(planId, chosen) {
+      await plans.updateOne({ _id: planId }, { $set: { chosen } });
     },
     async recordVote(planId, userId, venueId) {
       await plans.updateOne({ _id: planId }, { $set: { [`votes.${userId}`]: venueId } });

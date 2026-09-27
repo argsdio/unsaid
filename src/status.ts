@@ -27,7 +27,11 @@ function shortName(userId: string): string {
   return digits.length >= 4 ? `···${digits.slice(-4)}` : userId;
 }
 
-function clock(iso: string): string {
+// `chosen.time` is whatever went out on the card, which is a formatted clock
+// ("8:00 PM"), not an ISO stamp -- slicing that as ISO printed "12am".
+function clock(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(value)) return value;
+  const iso = value;
   const [h, m] = iso.slice(11, 16).split(":").map(Number);
   const hour = ((h ?? 0) % 12) || 12;
   const suffix = (h ?? 0) < 12 ? "am" : "pm";

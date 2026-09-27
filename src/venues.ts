@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type {
+  Coords,
   DietaryTag,
   FilterResult,
   Occasion,
@@ -184,6 +185,28 @@ export function filterVenues(
 // catalogue containing venues called Post, Bite, Folk and Ops does not match
 // them inside an ordinary sentence. The longest match wins, so "max soha" beats
 // a venue merely called Max.
+// A placeId is the unambiguous handle; a name search is the fallback for the
+// hand-written entries Places never matched.
+export function mapsLink(venue: Venue): string {
+  if (venue.placeId) return `https://www.google.com/maps/place/?q=place_id:${venue.placeId}`;
+  const q = encodeURIComponent(`${venue.name} ${venue.neighborhood} New York`);
+  return `https://www.google.com/maps/search/?api=1&query=${q}`;
+}
+
+// Transit, because this is New York and nobody is driving to dinner. `from` is
+// the person's own home, so everyone gets directions from where they actually
+// are rather than a link they have to retype.
+export function transitLink(venue: Venue, from?: Coords): string {
+  const parts = [
+    "https://www.google.com/maps/dir/?api=1",
+    `destination=${venue.lat},${venue.lng}`,
+    venue.placeId ? `destination_place_id=${venue.placeId}` : "",
+    from ? `origin=${from.lat},${from.lng}` : "",
+    "travelmode=transit",
+  ].filter(Boolean);
+  return parts.join("&");
+}
+
 export function findVenueByName(text: string): Venue | undefined {
   const flat = (s: string) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
   const needle = flat(text);

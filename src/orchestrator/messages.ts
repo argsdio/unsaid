@@ -1,6 +1,6 @@
 import type { Candidate, FailedOn, TimeWindow , Occasion } from "../contracts.ts";
-import { priceTier } from "../venues.ts";
-import type { Venue } from "../contracts.ts";
+import { mapsLink, priceTier, transitLink } from "../venues.ts";
+import type { Home, Venue } from "../contracts.ts";
 
 export function pickTime(window: TimeWindow): string {
   const start = new Date(window.start);
@@ -29,6 +29,54 @@ export function whenLabel(occasion: Occasion = "dinner", date?: string): string 
 export function describeVenue(venue: Venue): string {
   const cuisine = venue.cuisine ? venue.cuisine[0]!.toUpperCase() + venue.cuisine.slice(1) : "";
   return [cuisine, priceTier(venue)].filter(Boolean).join(" · ");
+}
+
+// What the joiner is walking into. The organiser's opening message already
+// decided the occasion, the day and often the vibe, and until now none of that
+// reached anybody else -- they were asked their budget for a plan they could not
+// see.
+export function planIntro(plan: { occasion?: Occasion; date?: string; vibe?: string[] }): string {
+  const when = whenLabel(plan.occasion, plan.date).toLowerCase();
+  // The occasion is itself a taste word, so drop it from the list or the sentence
+  // reads "brunch, and they're thinking brunch".
+  const asks = (plan.vibe ?? []).filter((w) => w !== (plan.occasion ?? "dinner"));
+  const wanted = asks.length ? ` They're thinking ${asks.slice(0, 3).join(", ")}.` : "";
+  return `The plan is ${when}.${wanted}`;
+}
+
+// Everything somebody needs to actually turn up: what, when, where, what it
+// costs, and how to get there from where they are.
+export function settledCard(
+  venue: Venue,
+  opts: {
+    time?: string;
+    occasion?: Occasion;
+    date?: string;
+    tally?: string;
+    from?: Home | null;
+  } = {},
+): string {
+  const when = [whenLabel(opts.occasion, opts.date), opts.time ? `at ${opts.time}` : ""]
+    .filter(Boolean)
+    .join(" ");
+  const lines = [
+    `Settled: ${venue.name}`,
+    `${describeVenue(venue)} · ${venue.neighborhood} · about $${venue.estCostUSD}`,
+    `${when}${opts.tally ? ` · ${opts.tally}` : ""}`,
+    "",
+    mapsLink(venue),
+  ];
+  if (opts.from) {
+    lines.push(`Transit from ${opts.from.label}: ${transitLink(venue, opts.from)}`);
+    // A neighbourhood centroid is what most people gave us, and door-to-door
+    // directions need better than that -- but only say so where it is useful.
+    if (!/\d/.test(opts.from.label)) {
+      lines.push(`(Text me your address any time and I'll make that door-to-door.)`);
+    }
+  } else {
+    lines.push(`Transit: ${transitLink(venue)}`);
+  }
+  return lines.join("\n");
 }
 
 export function planCard(

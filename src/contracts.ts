@@ -264,9 +264,12 @@ export type PlanDoc = {
   // message ("dinner friday?"). Without it every plan is silently today, so
   // times and blackouts resolve against the wrong day.
   date?: string;
-  // The options that went out, and who picked what. Stored so a reply of "2"
-  // can be resolved to a venue, and so a vote survives a restart.
+  // The options that went out, the time proposed with them, and who picked what.
+  // Stored so a reply of "2" resolves to a venue, a vote survives a restart, and
+  // the settled card can say when -- `chosen` used to be declared here and never
+  // written by anything, so `status` could not report the pick.
   shortlist?: string[];
+  proposedTime?: string;
   votes?: Record<string, string>;
 };
 

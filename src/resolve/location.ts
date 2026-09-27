@@ -22,6 +22,15 @@ function canonical(key: string): Coords | undefined {
 
 const ACRONYMS: Record<string, string> = { nyu: "NYU", dumbo: "DUMBO" };
 
+// Filler around a place name, so a geocoded answer reads like a place.
+const FILLER = /^(?:i'?m|im|i am|we'?re|currently|right|just)?\s*(?:at|in|on|near|around|by|close to|next to|coming from|starting from|from)\s+|\s*(?:actually|rn|right now|now|tho|though|please|thanks)\.?$/gi;
+
+function tidyPlace(raw: string): string {
+  const cleaned = raw.trim().replace(FILLER, "").replace(/\s+/g, " ").trim();
+  const text = cleaned || raw.trim();
+  return text.replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 function label(key: string): string {
   const target = PLACES[key] ? key : (ALIASES[key] ?? key);
   return ACRONYMS[target] ?? target.replace(/\b\w/g, (c) => c.toUpperCase());
@@ -48,7 +57,9 @@ export async function resolveHome(raw: string, geocode?: Geocoder): Promise<Slot
   if (geocode && (STREET_HINT.test(text) || text.split(" ").length <= 6)) {
     try {
       const found = await geocode(raw);
-      if (found) return { raw, value: { ...found, label: raw.trim() }, confidence: "high" };
+      // The label is shown back to people ("Transit from ..."), so it cannot be
+      // the whole sentence they typed: "im at 60th and lex actually" reads badly.
+      if (found) return { raw, value: { ...found, label: tidyPlace(raw) }, confidence: "high" };
     } catch {
       // Network trouble must never block slot-filling; fall through.
     }
