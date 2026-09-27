@@ -4,6 +4,7 @@ import { resolveTravelMin } from "./duration.ts";
 import { type Geocoder, resolveHome } from "./location.ts";
 import { resolveBudget } from "./money.ts";
 import { resolveWindow } from "./time.ts";
+import { sensitiveSlots } from "./sensitivity.ts";
 
 export { resolveDietary, resolveTravelMin, resolveHome, resolveBudget, resolveWindow };
 export type { Geocoder };
@@ -60,6 +61,17 @@ export async function resolveSlots(
     const slot = resolveTravelMin(raw.travelRaw);
     if (slot.value !== null || next.maxTravelMin === undefined) next.maxTravelMin = slot;
   }
+
+  // Flag slots the person hedged about, so the negotiation never asks them to
+  // flex on those. Recomputed each turn from the stored raw text.
+  const flagged = sensitiveSlots([
+    ["budgetCapUSD", next.budgetCapUSD?.raw],
+    ["maxTravelMin", next.maxTravelMin?.raw],
+    ["window", next.window?.raw],
+    ["home", next.home?.raw],
+    ["dietary", next.dietary?.raw],
+  ]);
+  if (flagged.length) next.sensitive = flagged;
 
   const tags = dedupe(next.tags, raw.tags);
   if (tags) next.tags = tags;

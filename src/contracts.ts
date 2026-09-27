@@ -59,6 +59,9 @@ export type Slots = {
   // How many times each slot has been asked. Drives the retry ladder: ask,
   // rephrase with an example, then assume a default rather than loop forever.
   attempts?: Partial<Record<RequiredSlot, number>>;
+  // Slots the person hedged about ("$25 tops, kinda broke rn"). The negotiation
+  // never asks these to flex, however much it would help the group.
+  sensitive?: RequiredSlot[];
 };
 
 export const REQUIRED_SLOTS = [
@@ -110,6 +113,46 @@ export type MergedConstraints = {
 };
 
 export const MERGED_KEYS = ["budgetCapUSD", "requiredDietary", "window"] as const;
+
+// Contract 12 -- the negotiation. Objections and concessions are typed so a
+// reason can cross the boundary without a name attached: the orchestrator learns
+// THAT a $25 cap exists, never whose it is. There is no free-text field, because
+// prose would carry identifying detail within two turns.
+export type Objection =
+  | { kind: "budget"; cap: number }
+  | { kind: "dietary"; tag: DietaryTag }
+  | { kind: "travel"; maxMin: number };
+
+// Dietary is absent on purpose. A dietary need is not a preference and is never
+// asked to bend.
+export type Concession =
+  | { kind: "budget"; newCap: number }
+  | { kind: "travel"; newMaxMin: number };
+
+export type Position = {
+  venueId: string;
+  move: "accept" | "hold";
+  score: number;
+};
+
+export type NegotiationRound = {
+  round: number;
+  proposals: string[];
+  // Unattributed and shuffled, so array order cannot be read as identity.
+  objections: Objection[];
+  concessions: Concession[];
+  narration: string;
+  settledOn?: string;
+};
+
+export type NegotiationResult =
+  | { status: "settled"; venueId: string; rounds: NegotiationRound[] }
+  | {
+      status: "failed";
+      reason: "no-overlap" | "deadlock" | "round-cap";
+      binding: Objection | null;
+      rounds: NegotiationRound[];
+    };
 
 // Contract 5 (A -> B). Batched: one payload per person per round.
 export type Candidate = { venueId: string; time: string; estCostUSD: number };
