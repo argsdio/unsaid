@@ -27,6 +27,45 @@ const RANGE = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|to|until|till|til|thru|t
 const AFTER = /(?:after|from|starting|past|post)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/;
 const BEFORE = /(?:before|by|until|till|til)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/;
 
+// Which of the four shapes a person used. The resolved window is always a pair,
+// because intersecting needs one, but echoing that pair back at somebody who
+// said "10 am" tells them they said "10am-2pm" -- which is how two different
+// answers looked identical in a real run.
+export type WindowShape = "range" | "from" | "until" | "at";
+
+export function windowShape(raw: string): WindowShape {
+  const text = normalise(raw);
+  if (RANGE.test(text)) return "range";
+  if (BEFORE.test(text)) return "until";
+  if (AFTER.test(text)) return "from";
+  return "at";
+}
+
+// How to say a resolved window back to the person who set it, in their own terms.
+export function describeWindow(raw: string, window: TimeWindow): string {
+  const from = hhmm(window.start);
+  const to = hhmm(window.end);
+  switch (windowShape(raw)) {
+    case "range":
+      return `${from}\u2013${to}`;
+    case "until":
+      return `before ${to}`;
+    case "from":
+      return `from ${from}`;
+    // A bare clock is a start, not a range: "10 am" means from 10, and the end
+    // is whenever this kind of outing stops being plausible.
+    case "at":
+      return `from ${from}`;
+  }
+}
+
+function hhmm(iso: string): string {
+  const [h, m] = iso.slice(11, 16).split(":").map(Number);
+  const hour = ((h ?? 0) % 12) || 12;
+  const suffix = (h ?? 0) < 12 ? "am" : "pm";
+  return m ? `${hour}:${String(m).padStart(2, "0")}${suffix}` : `${hour}${suffix}`;
+}
+
 export function resolveWindow(
   raw: string,
   day: Date = new Date(),

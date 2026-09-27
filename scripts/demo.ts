@@ -79,7 +79,20 @@ async function play(script: Script, n: number): Promise<void> {
   const space = (p: string) => ({
     id: `dm-${p}`, type: "dm" as const, phone: p,
     async responding(f: () => Promise<void>) { await f(); },
-    async send(c: unknown) { inbox[p]!.push(typeof c === "string" ? c : `[native poll]`); },
+    async send(c: unknown) {
+      if (typeof c === "string") { inbox[p]!.push(c); return; }
+      // Spectrum's builders are lazy: poll() returns { build() }, and the content
+      // only exists once Spectrum awaits it. Without building it here the demo
+      // sees an empty object and shows nothing.
+      const built = (await (c as { build?: () => Promise<unknown> }).build?.()) ?? c;
+      const card = built as { type?: string; title?: string; options?: Array<{ title?: string }> };
+      inbox[p]!.push(
+        [
+          `[native iMessage ${card.type ?? "card"}] ${card.title ?? ""}`,
+          ...(card.options ?? []).map((o, i) => `   ${i + 1}. ${o.title ?? ""}`),
+        ].join("\n"),
+      );
+    },
   });
   const inbound = (p: string, t: string) => ({
     direction: "inbound" as const,

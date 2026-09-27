@@ -14,7 +14,7 @@ import { type RawSlots, resolveSlots } from "./resolve/index.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
 import { resolveDietary } from "./resolve/dietary.ts";
 import { type Geocoder, resolveHome } from "./resolve/location.ts";
-import { clipWindow, defaultWindow } from "./resolve/time.ts";
+import { clipWindow, defaultWindow, describeWindow } from "./resolve/time.ts";
 import { BOROUGHS } from "./resolve/gazetteer.ts";
 import { classifyMeta, metaReply } from "./meta.ts";
 import { grokGeocoder } from "./resolve/geocode.ts";
@@ -78,12 +78,6 @@ const PROFILE_QUESTIONS: Record<ProfileField, string> = {
   preferredSpots: "Last one — any favourite places I should keep in mind?",
 };
 
-function hhmm(iso: string): string {
-  const [h, m] = iso.slice(11, 16).split(":").map(Number);
-  const hour = ((h ?? 0) % 12) || 12;
-  return `${hour}${m ? `:${String(m).padStart(2, "0")}` : ""}${(h ?? 0) < 12 ? "am" : "pm"}`;
-}
-
 // Echo back what this message filled. Cheap, and it makes a misread visible in
 // the very next turn instead of at `go` -- a budget silently set to $30 by a
 // mangled time would have been caught here immediately.
@@ -91,7 +85,7 @@ function acknowledge(before: Slots, after: Slots): string {
   const got: string[] = [];
   if (!before.home?.value && after.home?.value) got.push(after.home.value.label);
   if (!before.window?.value && after.window?.value) {
-    got.push(`${hhmm(after.window.value.start)}\u2013${hhmm(after.window.value.end)}`);
+    got.push(describeWindow(after.window.raw, after.window.value));
   }
   if (before.maxTravelMin?.value == null && after.maxTravelMin?.value != null) {
     got.push(`up to ${after.maxTravelMin.value} min`);

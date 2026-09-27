@@ -9,7 +9,7 @@ import { handleDM } from "./slots.ts";
 import { parseStatus, planStatus } from "./status.ts";
 import { extract, extractOffline } from "./agent/extract.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
-import { defaultWindow, resolveWindow } from "./resolve/time.ts";
+import { defaultWindow, describeWindow, resolveWindow } from "./resolve/time.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
 import { nothingFits, planIntro, settledCard, whenLabel } from "./orchestrator/messages.ts";
 import { VENUES, filterVenues, findVenueByName, isOpenDuring, mapsLink, matchesVibe, priceTier, venueById } from "./venues.ts";
@@ -446,6 +446,31 @@ async function main(): Promise<void> {
       (t) => resolveOccasion(t) === "coffee",
     ),
   );
+  // A real run: one person said "10 am - 2pm" and the other said "10 am", and
+  // both were told "10am-2pm - got it". The stored window is right -- free from
+  // 10 until brunch stops being brunch -- but echoing the pair back says they
+  // gave a range they never gave.
+  const brunchDay = new Date("2026-10-04T12:00:00");
+  const saidAt = resolveWindow("10 am", brunchDay, "brunch");
+  const saidRange = resolveWindow("10 am - 2pm", brunchDay, "brunch");
+  check(
+    "an open-ended time is not echoed back as somebody else's range",
+    describeWindow("10 am", saidAt.value!) === "from 10am" &&
+      describeWindow("10 am - 2pm", saidRange.value!) === "10am–2pm",
+    `${describeWindow("10 am", saidAt.value!)} vs ${describeWindow("10 am - 2pm", saidRange.value!)}`,
+  );
+  check(
+    "each way of saying a time is echoed the way it was said",
+    describeWindow("after 7", resolveWindow("after 7").value!) === "from 7pm" &&
+      describeWindow("before 9", resolveWindow("before 9").value!) === "before 9pm" &&
+      describeWindow("6 to 10", resolveWindow("6 to 10").value!) === "6pm–10pm" &&
+      describeWindow("8pm", resolveWindow("8pm").value!) === "from 8pm",
+  );
+  check(
+    "and the two answers still intersect to the same window",
+    saidAt.value!.start === saidRange.value!.start && saidAt.value!.end === saidRange.value!.end,
+  );
+
   check(
     "a bare '11' is 11am for brunch and 11pm for drinks",
     resolveWindow("11", new Date(), "brunch").value?.start.slice(11, 16) === "11:00" &&
@@ -891,6 +916,27 @@ async function main(): Promise<void> {
     "a clear majority does have one",
     tallyVotes({ u1: "b", u2: "b", u3: "a" }, ["a", "b"]).winner === "b",
   );
+  // The poll is on by default now. A real run got the numbered text because it
+  // was behind a flag nobody set, so this asserts what actually ships and that a
+  // tap and a typed number resolve to the same thing.
+  const pollRun = await negotiate(await openStore({ memory: true }), "neg-poll", easy, day);
+  if (pollRun.status === "settled" && pollRun.shortlist.length > 1) {
+    const labels = pollRun.shortlist.map((id) => {
+      const v = venueById(id)!;
+      return `${v.name} · $${v.estCostUSD}`;
+    });
+    check(
+      "every poll option resolves back to its own venue",
+      labels.every((label, i) => parseVote(label, pollRun.shortlist) === pollRun.shortlist[i]),
+      labels.join(" | "),
+    );
+    check(
+      "and typing the number picks the same one as tapping it",
+      parseVote("2", pollRun.shortlist) === pollRun.shortlist[1],
+    );
+  }
+  check("the native poll ships unless it is turned off", process.env.UNSAID_POLL !== "0");
+
   check(
     "a priced poll label still resolves to its venue",
     parseVote("Joe's Pizza · $12", ["joes-pizza", "taim"]) === "joes-pizza" &&

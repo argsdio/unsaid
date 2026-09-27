@@ -175,17 +175,16 @@ async function deliverOutcome(
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
-  // The native poll is OFF by default, behind UNSAID_POLL=1.
+  // The native poll is ON by default now: one has rendered correctly on a real
+  // phone, a tap registers, and taking a vote back off it works. It was off
+  // before that was known, which is why a real run got the numbered text and
+  // nobody could tap anything.
   //
-  // The fallback below only catches a send that throws. If Spectrum accepts the
-  // poll but iMessage renders it badly -- or delivers nothing -- sent is greater
-  // than zero, no fallback fires, and the options message simply never appears
-  // while the plan looks hung. Nobody has yet seen one on a real device, so the
-  // verified numbered text is what ships until someone has.
-  //
-  //   npm run polltest -- +1...   sends one to a phone
-  //   UNSAID_POLL=1 npm run start turns it on once that looks right
-  const pollEnabled = process.env.UNSAID_POLL === "1";
+  // `UNSAID_POLL=0` forces the numbered text. Keep that in mind on stage: the
+  // fallback below only catches a send that THROWS, so if Spectrum accepts a poll
+  // that iMessage renders as nothing, no fallback fires. The title carries the
+  // reply hint for exactly that case -- a number still works either way.
+  const pollEnabled = process.env.UNSAID_POLL !== "0";
   let result = { sent: 0, failed: 0 };
   if (outcome.poll && pollEnabled) {
     try {

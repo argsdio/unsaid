@@ -36,7 +36,7 @@ first. What changed in them, and why:
 | The opening message's taste words are a plan-level **vibe** every agent scores against, so "boba after class" produces boba. | `router.ts` at create |
 | The negotiation is delegated to `negotiate()`; the outcome can be **`ask`** — one person is being asked privately whether they can flex. | `orchestrator/negotiate.ts`, `sendTo` in `fanout.ts` |
 | Answering that private question is read **before** the `negotiating` bail-out. It used to be swallowed, and the plan hung forever. | `router.ts` |
-| The shortlist is up to three options with a vote, and a tie is handed back rather than decided. | `router.ts`, `voting.ts` |
+| The shortlist is up to three options with a vote, and a tie is handed back rather than decided. **It goes out as a native iMessage poll by default** (`UNSAID_POLL=0` for the numbered text). A tap and a typed number resolve to the same venue. | `router.ts`, `voting.ts` |
 | Settling writes `plan.chosen` and sends each person the venue, the map link and a **transit link from their own home**. | `announceSettled` in `router.ts`, `settledCard` in `messages.ts` |
 | Joining says what the plan is, and the pasted invite says what it is for. | `router.ts`, `shareText` in `plan.ts` |
 | The Nessie question follows the occasion instead of saying "your last dinners… still good for tonight?" | `nessie.ts` |
