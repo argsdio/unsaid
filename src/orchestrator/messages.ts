@@ -20,6 +20,19 @@ export function planCard(venue: Venue, card: Candidate): string {
   ].join("\n");
 }
 
+export function waitingOnOthers(have: number, need: number): string {
+  const left = need - have;
+  return left === 1
+    ? "Got your 👍. Waiting on one more person."
+    : `Got your 👍. Waiting on ${left} more people.`;
+}
+
+export function everyoneIn(cardText?: string): string {
+  const firstLine = cardText?.split("\n")[0]?.trim();
+  if (firstLine) return `Everyone's in. ${firstLine}. See you there.`;
+  return "Everyone's in. You're all set.";
+}
+
 const AREA: Record<FailedOn | "time", string> = {
   budget: "budget",
   dietary: "diet",

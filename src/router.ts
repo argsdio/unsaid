@@ -1,23 +1,37 @@
 import type { Message, Space } from "spectrum-ts";
+import type { HandleDMResult } from "./contracts.ts";
 import type { Store } from "./db.ts";
 import { fanOut, type SpaceLookup } from "./orchestrator/fanout.ts";
 import { runNegotiation } from "./orchestrator/negotiate.ts";
+import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
 import {
   abandonPlan,
   activePlan,
+  cardFor,
   createPlan,
   forgetSpaces,
+  goBlockers,
+  goReadiness,
   isHost,
   joinPlan,
+  logGoReadiness,
+  markConfirm,
   parseAddFavorite,
+  parseConfirmText,
+  parseForgetMe,
   parseGo,
   parseJoin,
   parseLeave,
+  forgetUser,
+  rememberCard,
   rememberSpace,
   saveFavorite,
   shareText,
   spacesFor,
+  waitingIds,
+  isConfirmEmoji,
 } from "./plan.ts";
+import { overlayNessieQuestion, rewriteNessieAnswer } from "./nessie.ts";
 import { handleDM, missingSlots } from "./slots.ts";
 import { planStatus, parseStatus } from "./status.ts";
 import { botLog, slotSnapshot } from "./log.ts";
@@ -49,6 +63,17 @@ async function send(space: Space, text: string, reason: string): Promise<void> {
   });
 }
 
+async function sendHandleDM(
+  space: Space,
+  userId: string,
+  result: HandleDMResult,
+  reason: string,
+  prefix = "",
+): Promise<void> {
+  const body = await overlayNessieQuestion(userId, result);
+  await send(space, prefix ? `${prefix}${body}` : body, reason);
+}
+
 async function onGo(
   space: Space,
   userId: string,
@@ -76,12 +101,10 @@ async function onGo(
     return;
   }
 
-  const waitingFields = new Set<string>();
-  for (const participant of plan.participants) {
-    const slots = await store.getSlots(plan._id, participant);
-    for (const key of missingSlots(slots)) waitingFields.add(key);
-  }
-  if (waitingFields.size > 0) {
+  const readiness = await goReadiness(store, plan);
+  logGoReadiness(readiness);
+  const blocked = goBlockers(readiness);
+  if (blocked.length > 0) {
     const labels: Record<string, string> = {
       home: "location",
       window: "time",
@@ -89,11 +112,14 @@ async function onGo(
       dietary: "diet",
       budgetCapUSD: "budget",
     };
-    const listed = [...waitingFields].map((key) => labels[key] ?? key).join(", ");
+    const waitingFields = [...new Set(blocked.flatMap((row) => row.missing))];
+    const listed = waitingFields.map((key) => labels[key] ?? key).join(", ");
+    const people =
+      blocked.length === 1 ? "1 person" : `${blocked.length} people`;
     await send(
       space,
-      `Still waiting on everyone's ${listed}. They'll get “got everything” when those are done.`,
-      `go: missing slots [${listed}]`,
+      `Still waiting on ${people} (${listed}). They'll get “got everything” when those are done.`,
+      `go: refused, ${people} incomplete`,
     );
     return;
   }
@@ -109,6 +135,7 @@ async function onGo(
 
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
+  rememberCard(plan._id, outcome.text);
   const result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
   console.log("go", { planId: plan._id, ...result });
   if (result.failed > 0 && result.sent > 0) {
@@ -137,17 +164,28 @@ export async function onDirectText(
   botLog("inbound", { userId, text, hasPlan: Boolean(current), planStatus: current?.status });
 
   if (joinCode) {
-    const result = await joinPlan(store, userId, joinCode, tracked);
-    if ("error" in result) {
-      await send(space, result.error, "join: unknown or retired code");
+    const joined = await joinPlan(store, userId, joinCode, tracked);
+    if ("error" in joined) {
+      await send(space, joined.error, "join: unknown or retired code");
       return;
     }
-    const { reply } = await handleDM(
-      { planId: result.plan._id, userId, text: "ready to join" },
+    const dm = await handleDM(
+      { planId: joined.plan._id, userId, text: "ready to join" },
       store,
     );
-    await send(space, `You're in (${result.plan.joinCode}).\n\n${reply}`, "join: attached + handleDM");
-    console.log("join", { userId, planId: result.plan._id, joinCode: result.plan.joinCode });
+    await sendHandleDM(
+      space,
+      userId,
+      dm,
+      "join: attached + handleDM",
+      `You're in (${joined.plan.joinCode}).\n\n`,
+    );
+    console.log("join", { userId, planId: joined.plan._id, joinCode: joined.plan.joinCode });
+    return;
+  }
+
+  if (parseForgetMe(text)) {
+    await send(space, await forgetUser(store, userId), "forget me: user wiped");
     return;
   }
 
@@ -186,8 +224,14 @@ export async function onDirectText(
 
   if (!current) {
     const plan = await createPlan(store, userId, tracked);
-    const { reply } = await handleDM({ planId: plan._id, userId, text }, store);
-    await send(space, `${shareText(plan.joinCode)}\n\n${reply}`, "create: new plan + handleDM");
+    const dm = await handleDM({ planId: plan._id, userId, text }, store);
+    await sendHandleDM(
+      space,
+      userId,
+      dm,
+      "create: new plan + handleDM",
+      `${shareText(plan.joinCode)}\n\n`,
+    );
     console.log("create", { userId, planId: plan._id, joinCode: plan.joinCode });
     return;
   }
@@ -197,16 +241,82 @@ export async function onDirectText(
     return;
   }
 
-  if (current.status === "proposed" || current.status === "confirmed") {
-    await send(space, "The plan is already out. Tap 👍 on the card to confirm.", "inbound ignored: status proposed/confirmed");
+  if (current.status === "confirmed") {
+    await send(space, "You're all set — everyone's already in.", "inbound ignored: status confirmed");
+    return;
+  }
+
+  if (current.status === "proposed") {
+    if (parseConfirmText(text)) {
+      await onConfirm(space, userId, store, lookup);
+      return;
+    }
+    await send(space, "The plan is already out. Tap 👍 on the card to confirm.", "inbound ignored: status proposed");
     return;
   }
 
   rememberSpace(current._id, userId, tracked);
-  botLog("handleDM inbound", { userId, planId: current._id, text });
-  const result = await handleDM({ planId: current._id, userId, text }, store);
-  botLog("handleDM stored slots after parse", { userId, missing: result.missing, ...slotSnapshot(result.slots) });
-  await send(space, result.reply, `handleDM next question (missing: ${result.missing.join(", ") || "none"})`);
+  const nextAsk = missingSlots(await store.getSlots(current._id, userId))[0];
+  const forSlots = rewriteNessieAnswer(userId, text, nextAsk);
+  botLog("handleDM inbound", { userId, planId: current._id, text: forSlots });
+  const dm = await handleDM({ planId: current._id, userId, text: forSlots }, store);
+  botLog("handleDM stored slots after parse", { userId, missing: dm.missing, ...slotSnapshot(dm.slots) });
+  await sendHandleDM(
+    space,
+    userId,
+    dm,
+    `handleDM next question (missing: ${dm.missing.join(", ") || "none"})`,
+  );
+}
+
+async function onConfirm(
+  space: Space,
+  userId: string,
+  store: Store,
+  lookup: SpaceLookup,
+): Promise<void> {
+  const plan = await activePlan(store, userId);
+  if (!plan) {
+    botLog("tapback ignored: no active plan", { userId });
+    return;
+  }
+
+  rememberSpace(plan._id, userId, asTrackedSpace(space));
+
+  if (plan.status === "confirmed") {
+    botLog("tapback ignored: already confirmed", { userId, planId: plan._id });
+    return;
+  }
+
+  if (plan.status !== "proposed") {
+    botLog("tapback ignored: plan not proposed yet", { userId, planId: plan._id, status: plan.status });
+    return;
+  }
+
+  const { first, have } = markConfirm(plan._id, userId);
+  const need = plan.participants.length;
+  const waiting = waitingIds(plan);
+  botLog("confirm", { userId, planId: plan._id, first, have, need, waiting });
+
+  if (have < need) {
+    if (first) {
+      await send(space, waitingOnOthers(have, need), "confirm: waiting on others");
+    }
+    return;
+  }
+
+  await store.setStatus(plan._id, "confirmed");
+  const latest = (await store.getPlan(plan._id)) ?? plan;
+  await fanOut(lookup, latest, spacesFor(latest), everyoneIn(cardFor(plan._id)), {
+    userId,
+    space,
+  });
+}
+
+function reactionEmoji(message: Message): string | null {
+  const content = message.content as { type?: string; emoji?: unknown };
+  if (content.type !== "reaction" || typeof content.emoji !== "string") return null;
+  return content.emoji;
 }
 
 export async function routeMessage(
@@ -217,13 +327,28 @@ export async function routeMessage(
 ): Promise<void> {
   if (message.direction === "outbound") return;
 
-  if (message.content.type === "reaction") {
-    return;
-  }
-  if (message.content.type !== "text") return;
-
   if (spaceKind(space) === "group") {
     console.log("skipping group message", space.id);
+    return;
+  }
+
+  const emoji = reactionEmoji(message);
+  if (emoji !== null) {
+    const userId = senderId(message, space);
+    botLog("inbound reaction", { userId, emoji });
+    if (!isConfirmEmoji(emoji)) {
+      botLog("tapback ignored: not a confirm emoji", { userId, emoji });
+      return;
+    }
+    await onConfirm(space, userId, store, lookup);
+    return;
+  }
+
+  if (message.content.type !== "text") {
+    botLog("inbound skipped: unsupported content", {
+      type: message.content.type,
+      keys: Object.keys(message.content),
+    });
     return;
   }
 
