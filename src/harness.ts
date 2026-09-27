@@ -594,6 +594,27 @@ async function main(): Promise<void> {
   check("and never the same line twice running", doneRepeats === 0);
   await doneStore.close();
 
+  // Withdrawing a vote. Un-tapping an option on a native poll is not the same as
+  // changing it -- the person is undecided again, and the tally has to agree
+  // with what the poll on their phone now shows.
+  const unvoteStore = await openStore({ memory: true });
+  await unvoteStore.createPlan({
+    _id: "uv", joinCode: "UV01", participants: ["p1", "p2"], status: "proposed", slots: {},
+  });
+  await unvoteStore.setShortlist("uv", ["joes-pizza", "taim"]);
+  await unvoteStore.recordVote("uv", "p1", "joes-pizza");
+  await unvoteStore.removeVote("uv", "p1");
+  check("withdrawing leaves no vote behind", Object.keys((await unvoteStore.getPlan("uv"))?.votes ?? {}).length === 0);
+  await unvoteStore.recordVote("uv", "p1", "taim");
+  await unvoteStore.recordVote("uv", "p2", "taim");
+  await unvoteStore.removeVote("uv", "p2");
+  check(
+    "and removes only that person's",
+    (await unvoteStore.getPlan("uv"))?.votes?.p1 === "taim" &&
+      (await unvoteStore.getPlan("uv"))?.votes?.p2 === undefined,
+  );
+  await unvoteStore.close();
+
   // A tie must not be decided for people. With two participants ANY
   // disagreement ties, so silently taking the higher-scoring option overrules
   // somebody every single time.

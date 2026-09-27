@@ -24,6 +24,9 @@ export type Store = {
   setShortlist(planId: string, venueIds: string[]): Promise<void>;
   // One vote per person; voting again replaces the previous choice.
   recordVote(planId: string, userId: string, venueId: string): Promise<void>;
+  // Un-tapping an option on a native poll removes the vote entirely, which is
+  // different from changing it -- the person is back to undecided.
+  removeVote(planId: string, userId: string): Promise<void>;
   // Full teardown: the plan, its rounds and its messages. Used to reset between
   // demo runs, and so tests can clean up after themselves against a real cluster.
   deletePlan(planId: string): Promise<void>;
@@ -118,6 +121,12 @@ function memoryStore(): Store {
     async recordVote(planId, userId, venueId) {
       const plan = ensure(planId);
       plan.votes = { ...(plan.votes ?? {}), [userId]: venueId };
+    },
+    async removeVote(planId, userId) {
+      const plan = plans.get(planId);
+      if (!plan?.votes) return;
+      const { [userId]: _gone, ...rest } = plan.votes;
+      plans.set(planId, { ...plan, votes: rest });
     },
     async deletePlan(planId) {
       plans.delete(planId);
@@ -279,6 +288,9 @@ async function mongoStore(uri: string): Promise<Store> {
     },
     async recordVote(planId, userId, venueId) {
       await plans.updateOne({ _id: planId }, { $set: { [`votes.${userId}`]: venueId } });
+    },
+    async removeVote(planId, userId) {
+      await plans.updateOne({ _id: planId }, { $unset: { [`votes.${userId}`]: "" } });
     },
     async deletePlan(planId) {
       await Promise.all([

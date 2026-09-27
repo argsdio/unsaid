@@ -565,10 +565,23 @@ export async function routeMessage(
     const choice = message.content as { selected?: boolean; title?: string; option?: { title?: string } };
     const title = choice.option?.title ?? choice.title ?? "";
     botLog("inbound poll vote", { userId, title, selected: choice.selected });
-    if (choice.selected === false || !title) return;
 
     const plan = await activePlan(store, userId);
     if (!plan || plan.status !== "proposed") return;
+
+    // Un-tapping an option withdraws the vote. Treating it as a no-op left the
+    // old choice standing, so the tally disagreed with what the poll showed.
+    if (choice.selected === false) {
+      await store.removeVote(plan._id, userId);
+      const left = plan.participants.length - Object.keys((await store.getPlan(plan._id))?.votes ?? {}).length;
+      await send(
+        space,
+        left > 0 ? `Took your pick back. ${left} still to decide.` : "Took your pick back.",
+        "poll vote withdrawn",
+      );
+      return;
+    }
+    if (!title) return;
     const picked = parseVote(title, plan.shortlist ?? []);
     if (picked) {
       await castVote(space, store, lookup, plan, userId, picked);
