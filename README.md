@@ -1,99 +1,52 @@
-# unsaid
+# Unsaid
 
-A [Spectrum](https://photon.codes/docs/spectrum-ts) project. Wired with: imessage.
+An iMessage agent that collects dinner constraints in **private 1:1 chats**, then proposes a spot that works for everyone. Unsaid is **not** in the group thread: the host pastes a join code, each person texts the bot separately.
 
-## Environment
+Built with [Photon Spectrum](https://photon.codes/docs/spectrum-ts) (`spectrum-ts`).
 
-Before running, open `.env` and fill in the values:
+## What it does
 
-From your project Settings on the [Photon dashboard](https://app.photon.codes):
+- Host texts a plan (e.g. Friday dinner). Everyone else sends `JOIN ABCD`.
+- Each person answers location, time, travel, diet, and budget in their own DM.
+- **Nessie** (optional) suggests a budget from dinner-like purchases; people can accept or override.
+- **Grok** (optional) parses messy replies and scores venues; without a key, extraction and ranking stay deterministic.
+- `go` (host) negotiates a shortlist. Several options go out as an iMessage poll plus a numbered list; one option is a settle card.
+- The winner is fanned to every DM, with a Google Maps pin and transit from that person’s home.
 
-- `PROJECT_ID`
-- `PROJECT_SECRET`
+Google **Places** is used only when regenerating `src/venues.json` (`npm run venues`). Runtime never calls Places.
+
+## Setup
+
+```sh
+git clone https://github.com/argsdio/unsaid.git
+cd unsaid
+npm install
+cp .env.example .env
+```
+
+Fill `.env` (never commit it):
+
+| Variable | Needed for | Without it |
+|---|---|---|
+| `PROJECT_ID` / `PROJECT_SECRET` | [Photon dashboard](https://app.photon.codes) — iMessage | the app cannot start |
+| `MONGODB_URI` / `MONGODB_DB` | shared plans across restarts | in-memory store; joins die on restart |
+| `XAI_API_KEY` / `GROK_MODEL` | Grok | offline extraction and scoring |
+| `NESSIE_API_KEY` | live Nessie sandbox (`https://api.nessieisreal.com`) | seeded dinner ledgers, still labeled Nessie |
+| `GOOGLE_PLACES_API_KEY` | `npm run venues` only | unused at runtime |
+
+If several people share one bot, they must use the **same Photon project and the same MongoDB**. Two `npm run start` processes on the same `PROJECT_ID` both receive every message — run **one** Spectrum process. Atlas: allowlist `0.0.0.0/0` if connections hang; URL-encode passwords that contain `@ : / ? #`.
 
 ## Run
 
 ```sh
-npm install
-npm run start
+npm run harness    # end-to-end checks, no phones
+npm run start      # iMessage bot
+npm run backroom   # projector UI at http://localhost:4321 (reads Mongo)
 ```
 
-## Unsaid — start here
+`forget me` wipes that person’s stored profile for a demo reset.
 
-Two lanes, split in `docs/`: **A** owns messaging and flow (Spectrum, router, join
-codes, orchestrator, Nessie); **B** owns agents, data and screen. Read
-`docs/plan-teammate-a.md` or `docs/plan-teammate-b.md` for your own lane, and
-`docs/negotiation-protocol.md` for the proposed multi-agent negotiation.
-
-### Setup
-
-```sh
-git clone <this repo> && cd unsaid
-npm install
-cp .env.example .env     # then fill it in, see below
-npm run harness          # verifies your setup: 54 assertions
-npm run start            # runs the app
-```
-
-Fill `.env` with the values in the table below. **Two of these must match your
-teammate's exactly:**
-
-| Variable | Where from | Shared? |
-|---|---|---|
-| `PROJECT_ID`, `PROJECT_SECRET` | [Photon dashboard](https://app.photon.codes) → Settings | **yes, same project** |
-| `MONGODB_URI`, `MONGODB_DB` | MongoDB Atlas → Connect → Drivers | **yes, same cluster** |
-| `XAI_API_KEY` | xAI console | yes |
-
-**Why the sharing matters.** The two lanes only meet through the database: A's
-router writes plans and rounds, B's backroom screen reads them. Point them at
-separate Atlas clusters and each half works perfectly alone while nothing works
-together — with no error message to explain it.
-
-**Only one person runs `npm run start`.** Two processes on the same `PROJECT_ID`
-both receive every inbound message, so you get duplicate replies and doubled
-writes. Decide who hosts the app; the other runs `npm run backroom`, which reads
-the same database and needs no Spectrum connection.
-
-Atlas gotchas: allowlist `0.0.0.0/0` under Network Access or connections hang
-rather than failing, and URL-encode the password if it contains `@ : / ? #`.
-
-### Run B's lane with nothing configured
-
-Both work with no API key, no Atlas and no Spectrum — useful for checking out the
-repo and confirming it is alive:
-
-```sh
-npm run harness    # three fake users -> a plan, plus assertions
-npm run backroom   # projector screen on http://localhost:4321
-```
-
-### For teammate A
-
-`src/contracts.ts` is the shared contract file. Import the types from it rather
-than redefining them — tonight the compiler is the only thing catching contract
-drift between the two lanes. The seam you call is `handleDM` in `src/slots.ts`
-(contract 2): hand it `{ planId, userId, text }` and it returns the resolved
-slots, what is still missing, and the DM string to send back.
-
-Two things that affect A's code:
-
-- **`merged.window` is not a venue filter.** Venue records have no `hours` (demo
-  scope is one evening), so the window is how A assigns each candidate's *time*.
-  `filterVenues` applies budget, dietary and travel only.
-- **Travel never reaches A.** `filterVenues` enforces it from home coordinates
-  that stay inside B, and returns one unlabelled `longestTravelMin` per survivor
-  for the "minimise the longest commute" tiebreak.
-
-### Degradation, and why it is quiet
-
-Nothing crashes when a key is missing — behaviour just gets worse. Without
-`XAI_API_KEY` the agents fall back to deterministic scoring and offline slot
-extraction; without `MONGODB_URI` the store runs in memory and loses everything
-on restart. Useful for development, dangerous to assume: check `npm run harness`
-output, which states which store it used.
-
-## Where to go next
+## Links
 
 - [Spectrum docs](https://photon.codes/docs/spectrum-ts)
-- Edit `src/index.ts` to replace the echo loop with real agent logic.
-- Add more providers from `spectrum-ts/providers/*`.
+- [Photon dashboard](https://app.photon.codes)
