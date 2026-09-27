@@ -168,12 +168,19 @@ async function deliverOutcome(
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
-  // Try the native poll first: it renders as a real iMessage poll and taps come
-  // back as poll_option votes. Fall back to the numbered text if the line or the
-  // client will not take it -- losing the message entirely would be far worse
-  // than losing the widget.
+  // The native poll is OFF by default, behind UNSAID_POLL=1.
+  //
+  // The fallback below only catches a send that throws. If Spectrum accepts the
+  // poll but iMessage renders it badly -- or delivers nothing -- sent is greater
+  // than zero, no fallback fires, and the options message simply never appears
+  // while the plan looks hung. Nobody has yet seen one on a real device, so the
+  // verified numbered text is what ships until someone has.
+  //
+  //   npm run polltest -- +1...   sends one to a phone
+  //   UNSAID_POLL=1 npm run start turns it on once that looks right
+  const pollEnabled = process.env.UNSAID_POLL === "1";
   let result = { sent: 0, failed: 0 };
-  if (outcome.poll) {
+  if (outcome.poll && pollEnabled) {
     try {
       const card = poll(outcome.poll.title, ...outcome.poll.options.map((o) => option(o)));
       result = await fanOut(lookup, latest, spacesFor(latest), card, { userId, space });
@@ -185,7 +192,7 @@ async function deliverOutcome(
   if (result.sent === 0) {
     result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
   }
-  console.log("go", { planId: plan._id, shortlist: outcome.shortlist, poll: Boolean(outcome.poll), ...result });
+  console.log("go", { planId: plan._id, shortlist: outcome.shortlist, poll: pollEnabled, ...result });
   if (result.failed > 0 && result.sent > 0) {
     await send(
       space,
