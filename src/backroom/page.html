@@ -45,6 +45,8 @@
   .saw { border-top: 1px solid var(--line); padding-top: 14px; }
   code { font: 14px/1.6 ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent); }
   .hidden { display: none; }
+  .divider { height: 1px; background: var(--line); margin: 14px 0 4px; }
+  .summary { color: var(--dim); font-size: 14px; padding-top: 12px; font-style: italic; }
 </style>
 </head>
 <body>
@@ -85,31 +87,56 @@
       : "Show what each person said";
   });
 
+  // A's round carries every rejected venue -- 42 of 50 in a typical run. Showing
+  // them all is unreadable on a projector, so survivors get full rows, a handful
+  // of eliminations get struck out for the visible-crossing-out beat, and the
+  // rest collapse into one counted line.
+  const CROSSOUTS_SHOWN = 6;
+
   function renderCandidates(rounds) {
     const round = rounds[rounds.length - 1];
     if (!round) return "<div class='sub'>waiting for the first round…</div>";
 
-    const passed = round.candidates.filter((c) => c.passed);
     const worstOf = (c) => (c.scores.length ? Math.min(...c.scores) : -1);
-    let best = null;
-    for (const c of passed) if (!best || worstOf(c) > worstOf(best)) best = c;
+    const passed = round.candidates
+      .filter((c) => c.passed)
+      .sort((a, b) => worstOf(b) - worstOf(a));
+    const failed = round.candidates.filter((c) => !c.passed);
+    const best = passed[0];
 
-    return round.candidates
-      .map((c) => {
-        const worst = worstOf(c);
-        const bars = c.scores
-          .map((s) => `<div class="bar" style="height:${Math.max(3, s * 26)}px"></div>`)
-          .join("");
-        return `<div class="row ${c.passed ? "" : "out"} ${best && c.venueId === best.venueId ? "winner" : ""}">
-          <span class="name">${esc(c.name)}</span>
-          <span class="hood">${esc(c.neighborhood)}</span>
-          <span class="cost">${c.estCostUSD === null ? "" : "$" + c.estCostUSD}</span>
-          ${c.passed
-            ? `<div class="bars">${bars}</div><span class="worst">${worst < 0 ? "" : worst.toFixed(2)}</span>`
-            : `<span class="why">reason private — ${WHY[c.failedOn] || "filtered"}</span>`}
-        </div>`;
-      })
-      .join("");
+    const rows = passed.map((c) => {
+      const bars = c.scores
+        .map((s) => `<div class="bar" style="height:${Math.max(3, s * 26)}px"></div>`)
+        .join("");
+      return `<div class="row ${best && c.venueId === best.venueId ? "winner" : ""}">
+        <span class="name">${esc(c.name)}</span>
+        <span class="hood">${esc(c.neighborhood)}</span>
+        <span class="cost">${c.estCostUSD === null ? "" : "$" + c.estCostUSD}</span>
+        <div class="bars">${bars}</div>
+        <span class="worst">${worstOf(c).toFixed(2)}</span>
+      </div>`;
+    });
+
+    const crossouts = failed.slice(0, CROSSOUTS_SHOWN).map((c) => `<div class="row out">
+        <span class="name">${esc(c.name)}</span>
+        <span class="hood">${esc(c.neighborhood)}</span>
+        <span class="cost">${c.estCostUSD === null ? "" : "$" + c.estCostUSD}</span>
+        <span class="why">reason private — ${WHY[c.failedOn] || "filtered"}</span>
+      </div>`);
+
+    const remaining = failed.length - crossouts.length;
+    let summary = "";
+    if (remaining > 0) {
+      const byCategory = {};
+      for (const c of failed) byCategory[c.failedOn] = (byCategory[c.failedOn] || 0) + 1;
+      const parts = Object.entries(byCategory)
+        .sort((a, b) => b[1] - a[1])
+        .map(([key, n]) => `${n} ${WHY[key] || key}`);
+      summary = `<div class="summary">+${remaining} more eliminated · ${parts.join(" · ")}</div>`;
+    }
+
+    return rows.join("") + (crossouts.length ? `<div class="divider"></div>` : "") +
+      crossouts.join("") + summary;
   }
 
   function renderReveal(said, merged) {
