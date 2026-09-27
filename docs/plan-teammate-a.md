@@ -1,5 +1,58 @@
 # Unsaid — teammate A lane: messaging and flow
 
+## Where this is now — read this first, the rest is reference
+
+Everything below this section was written before either lane existed. It is still
+accurate about the Spectrum API and the contracts, and wrong about the schedule
+and about what is built. Current state:
+
+**It runs end to end.** Join, slot-filling, `go`, negotiation with private asks,
+a shortlist, voting, settling, and a card with directions. 176 assertions pass
+(`npm run harness`). The negotiation section further down says "NOT BUILT" — it
+is built; `src/negotiation.ts` is contract 12 and `docs/negotiation-protocol.md`
+is the spec.
+
+**To run it you need nothing new.** Same `.env` as before: `PROJECT_ID`,
+`PROJECT_SECRET`, `MONGODB_URI` (the same one as B — the two lanes only meet
+through the database), and `XAI_API_KEY` for Grok. There is a Google Places key
+in `.env.example` now; it is for `npm run venues` only and the app never reads
+it. The 1089-venue catalogue is committed.
+
+```sh
+npm run demo      # eight scenarios through the real router, no phones, no credentials
+npm run harness   # every assertion, both lanes
+npm run start     # the real thing — ONE of us at a time, or we both answer every message
+npm run backroom  # the projector screen on :4321
+```
+
+**Pull before you edit.** These files in your lane changed: `router.ts`,
+`plan.ts`, `orchestrator/negotiate.ts`, `orchestrator/messages.ts`,
+`orchestrator/fanout.ts`, `nessie.ts`, `log.ts`. Commit or stash anything local
+first. What changed in them, and why:
+
+| Change | Where |
+|---|---|
+| A plan has an **occasion** (brunch, lunch, dinner, drinks, coffee) and a **date**, both read from the opening message. They decide which venues qualify, what a bare "11" means, and every bit of copy. | `router.ts` at create, `messages.ts` (`whenLabel`) |
+| The opening message's taste words are a plan-level **vibe** every agent scores against, so "boba after class" produces boba. | `router.ts` at create |
+| The negotiation is delegated to `negotiate()`; the outcome can be **`ask`** — one person is being asked privately whether they can flex. | `orchestrator/negotiate.ts`, `sendTo` in `fanout.ts` |
+| Answering that private question is read **before** the `negotiating` bail-out. It used to be swallowed, and the plan hung forever. | `router.ts` |
+| The shortlist is up to three options with a vote, and a tie is handed back rather than decided. | `router.ts`, `voting.ts` |
+| Settling writes `plan.chosen` and sends each person the venue, the map link and a **transit link from their own home**. | `announceSettled` in `router.ts`, `settledCard` in `messages.ts` |
+| Joining says what the plan is, and the pasted invite says what it is for. | `router.ts`, `shareText` in `plan.ts` |
+| The Nessie question follows the occasion instead of saying "your last dinners… still good for tonight?" | `nessie.ts` |
+| `botLog` respects `UNSAID_QUIET=1`, and the four bare `console.log`s go through it. | `log.ts`, `router.ts`, `fanout.ts` |
+
+**Still yours, and the first one is the worst bug we know about:**
+
+1. `abandonPlan`'s non-host path clears `activePlanId` but never calls
+   `store.removeParticipant`, which exists. A leaver blocks `go` forever.
+2. `parseLeave` misses `cancel`, `stop`, `quit`, `never mind`, `forget it`; and
+   `new plan` from a host silently deletes everyone's plan with no confirmation.
+3. The `spaces` map is process-local, so fan-out cannot reach anyone who has not
+   texted since the last restart.
+4. `saveFavorite` still calls `upsertUser`; `store.addFavorite(userId, venueId)`
+   is there for it.
+
 ## Context
 
 DivHacks build night, 4pm–12am. The work splits two ways: **A owns messaging and flow** (Spectrum, router, join codes, orchestrator state machine, Nessie); **B owns agents, data and screen** (Grok extraction and scoring, aggregator, venues, backroom screen). B's lane is in `plan-teammate-b.md`.
@@ -349,9 +402,13 @@ Contracts 1, 2, 3, 4, 6 and 8 are implemented and covered by `npm run harness` �
 
 **Contracts 5, 6 and 7 have a proposed change pending.** Read the next section before writing the state machine — one small decision now avoids a rewrite later.
 
-## Proposed: agent-to-agent negotiation — NOT BUILT
+## Agent-to-agent negotiation — BUILT
 
-**Status: proposed, no code exists.** `src/contracts.ts` on `main` is unchanged and every signature above is still accurate. Do not build against this section. **The full spec is `docs/negotiation-protocol.md`** — move types, termination, contract 12 and the pause/resume semantics live there; this section is the summary. It is here because one decision in A's state machine is much cheaper to make now than later — the `maxRounds = 1` loop in step 6.
+**Status: built and in use.** `src/negotiation.ts` is contract 12, `runNegotiation`
+and `resumeAfterWhisper` in `orchestrator/negotiate.ts` are how A reaches it, and
+the round logs go to the backroom screen. The description below is still the right
+summary of the idea; the signatures it calls "unchanged" have since changed, so
+trust `src/contracts.ts`. **The full spec is `docs/negotiation-protocol.md`** — move types, termination, contract 12 and the pause/resume semantics live there; this section is the summary. It is here because one decision in A's state machine is much cheaper to make now than later — the `maxRounds = 1` loop in step 6.
 
 ### What it is
 
