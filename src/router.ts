@@ -5,6 +5,7 @@ import type { Store } from "./db.ts";
 import { fanOut, sendTo, type SpaceLookup } from "./orchestrator/fanout.ts";
 import { type NegotiateOutcome, resumeAfterWhisper, runNegotiation } from "./orchestrator/negotiate.ts";
 import { parseVote, tallyVotes } from "./voting.ts";
+import { classifyMeta } from "./meta.ts";
 import { resolveDate } from "./resolve/date.ts";
 import { venueById } from "./venues.ts";
 import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
@@ -300,31 +301,56 @@ export async function onDirectText(
       }
     }
 
-    // Not a vote and not a tapback. Previously every one of these got the same
-    // canned line, twice in a row if you kept talking. Say something that
-    // depends on what the person has actually done.
+    // Not a vote and not a tapback. Every one of these used to get the identical
+    // canned line, however many times you wrote. Answer the aside where there is
+    // one, and otherwise rotate -- never the same string twice running.
+    const cast = Object.keys(current.votes ?? {}).length;
+    const need = current.participants.length;
     const mine = current.votes?.[userId];
-    if (mine) {
-      const outstanding = current.participants.length - Object.keys(current.votes ?? {}).length;
+    const list = shortlist.map((id, i) => `${i + 1}. ${venueById(id)?.name ?? id}`).join("\n");
+    const meta = classifyMeta(text);
+
+    if (meta === "options" && shortlist.length > 1) {
+      await send(space, `On the table:\n\n${list}\n\nReply with a number.`, "proposed: listed options");
+      return;
+    }
+    if (meta === "who") {
+      await send(space, `${cast} of ${need} have picked so far.`, "proposed: vote count");
+      return;
+    }
+    if (meta === "help" || meta === "why") {
       await send(
         space,
-        outstanding > 0
-          ? `You picked ${venueById(mine)?.name ?? mine}. Waiting on ${outstanding} more.`
-          : `You picked ${venueById(mine)?.name ?? mine}. Counting them now.`,
+        `These all cleared everyone's limits, so any of them works. Reply with a number and the most-picked one wins.`,
+        "proposed: explained",
+      );
+      return;
+    }
+
+    if (mine) {
+      const name = venueById(mine)?.name ?? mine;
+      await send(
+        space,
+        need - cast > 0
+          ? `You're down for ${name}. Waiting on ${need - cast} more.`
+          : `You're down for ${name}. Counting them now.`,
         "proposed: already voted",
       );
-    } else if (shortlist.length > 1) {
-      const options = shortlist
-        .map((id, i) => `${i + 1}. ${venueById(id)?.name ?? id}`)
-        .join("\n");
-      await send(
-        space,
-        `Still open — reply with a number and I'll count it.\n\n${options}`,
-        "proposed: nudge to vote",
-      );
-    } else {
-      await send(space, "Tap 👍 on the card if that works for you.", "proposed: nudge to confirm");
+      return;
     }
+
+    if (shortlist.length > 1) {
+      const variants = [
+        `Still open — reply with a number and I'll count it.\n\n${list}`,
+        `Whichever you like, just send the number. ${cast} of ${need} have picked.`,
+        `No rush. A number when you've decided, or tap 👍 on the card to take the top one.`,
+      ];
+      const turn = bumpNudge(current._id, userId);
+      await send(space, variants[turn % variants.length]!, `proposed: nudge ${turn + 1}`);
+      return;
+    }
+
+    await send(space, "Tap 👍 on the card if that works for you.", "proposed: nudge to confirm");
     return;
   }
 
@@ -355,6 +381,17 @@ export async function onDirectText(
 
 // A vote arrives as "2", "#2", "option 2" or the venue's name. When the last
 // person votes, the winner is announced to everyone.
+// Per-conversation nudge counter, so a reminder is never the same string twice
+// in a row. Process-local on purpose: losing the count on restart just means
+// starting the rotation over, which is harmless.
+const nudges = new Map<string, number>();
+function bumpNudge(planId: string, userId: string): number {
+  const key = `${planId}:${userId}`;
+  const next = nudges.get(key) ?? 0;
+  nudges.set(key, next + 1);
+  return next;
+}
+
 async function castVote(
   space: Space,
   store: Store,

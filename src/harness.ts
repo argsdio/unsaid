@@ -17,6 +17,7 @@ import { openStore } from "./db.ts";
 import { negotiate, parseAgreement, resumeNegotiation } from "./negotiation.ts";
 import { parseVote, tallyVotes } from "./voting.ts";
 import { resolveDate } from "./resolve/date.ts";
+import { classifyMeta } from "./meta.ts";
 import { isSensitive } from "./resolve/sensitivity.ts";
 
 type FakeUser = {
@@ -550,6 +551,48 @@ async function main(): Promise<void> {
   );
 
   await negStore.close();
+
+  // Meta-turns. A question is not an answer -- previously nine asides walked a
+  // person through onboarding and all the way to "got everything I need".
+  check(
+    "asides are recognised for what they are",
+    classifyMeta("help") === "help" &&
+      classifyMeta("why do you need that") === "why" &&
+      classifyMeta("who else is coming") === "who" &&
+      classifyMeta("?") === "confused" &&
+      classifyMeta("😂") === "confused",
+  );
+  check(
+    "a real answer is never mistaken for an aside",
+    classifyMeta("bushwick") === null &&
+      classifyMeta("$25") === null &&
+      classifyMeta("after 7") === null &&
+      classifyMeta("i eat everything") === null,
+  );
+
+  const metaStore = await openStore({ memory: true });
+  await metaStore.upsertUser({
+    _id: "mu", phone: "mu", profile: { tastes: [], preferredSpots: [] },
+    onboardedAt: "now", askedProfile: [], wishlist: [],
+  });
+  await handleDM({ planId: "mp2", userId: "mu", text: "dinner?" }, metaStore);
+  const askedOnce = (await metaStore.getSlots("mp2", "mu")).attempts?.home ?? 0;
+  const asides: string[] = [];
+  for (const probe of ["?", "huh", "?", "help", "help", "who else is coming"]) {
+    asides.push((await handleDM({ planId: "mp2", userId: "mu", text: probe }, metaStore)).reply);
+  }
+  check(
+    "six asides do not burn a single retry",
+    ((await metaStore.getSlots("mp2", "mu")).attempts?.home ?? 0) === askedOnce,
+  );
+  check(
+    "and nothing was silently assumed on their behalf",
+    (await metaStore.getSlots("mp2", "mu")).home?.value == null,
+  );
+  let metaRepeats = 0;
+  for (let i = 1; i < asides.length; i++) if (asides[i] === asides[i - 1]) metaRepeats++;
+  check("no two consecutive asides get the same reply", metaRepeats === 0, `(${metaRepeats})`);
+  await metaStore.close();
 
   // Voting. "Reply 1, 2 or 3" was an instruction the system could not honour.
   check(

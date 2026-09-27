@@ -15,6 +15,7 @@ import { resolveDietary } from "./resolve/dietary.ts";
 import { type Geocoder, resolveHome } from "./resolve/location.ts";
 import { clipWindow, eveningWindow } from "./resolve/time.ts";
 import { BOROUGHS } from "./resolve/gazetteer.ts";
+import { classifyMeta, metaReply } from "./meta.ts";
 import { grokGeocoder } from "./resolve/geocode.ts";
 import { findVenueByName } from "./venues.ts";
 
@@ -316,12 +317,25 @@ export async function handleDM(
     text: input.text,
   });
 
-  const stored = await store.getUser(input.userId);
-  const existing = await store.getSlots(input.planId, input.userId);
-
   async function reply(text: string, slots: Slots, missing: RequiredSlot[]): Promise<HandleDMResult> {
     await store.appendMessage(input.planId, input.userId, { at: now, direction: "out", text });
     return { slots, missing, reply: text };
+  }
+
+  const stored = await store.getUser(input.userId);
+  const existing = await store.getSlots(input.planId, input.userId);
+
+  // A question is not an answer. Handled before anything reads it as one, so an
+  // aside never burns a retry or triggers an assumed default.
+  const meta = classifyMeta(input.text);
+  if (meta) {
+    const pending = stored?.onboardedAt
+      ? missingSlots(seedFromProfile(existing, stored).slots)[0]
+      : undefined;
+    // Seeded on the number of EXCHANGES, not stored messages: history grows by two
+    // per turn, so seeding on its length gave an always-even number and a
+    // two-variant rotation never alternated.
+    return reply(metaReply(meta, pending, Math.floor(history.length / 2)), existing, missingSlots(existing));
   }
 
   let justOnboarded = false;
