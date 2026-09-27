@@ -236,6 +236,9 @@ import { VENUES, filterVenues, venueById } from "./venues.ts";
 | `./db.ts` | `store.getPlanByJoinCode(code): Promise<PlanDoc \| null>` — only matches a plan that is still live |
 | `./db.ts` | `store.getPlan(planId)`, `store.addParticipant(planId, userId)` (idempotent), `store.setStatus(planId, status)` |
 | `./db.ts` | `store.appendRound(round)`, `store.listRounds(planId)` — contract 7 |
+| `./db.ts` | `store.setActivePlan(userId, planId)` — **use this on join. Never `upsertUser`** |
+| `./db.ts` | `store.appendMessage(...)`, `store.listMessages(...)` — B writes these inside `handleDM`; A does not call them |
+| `./slots.ts` | `missingSlots(slots)`, `nextQuestion(missing)` — exported if A wants to inspect readiness herself |
 | `./slots.ts` | `handleDM(input: HandleDMInput, store: Store): Promise<HandleDMResult>` |
 | `./aggregator.ts` | `mergeConstraints(people: Participant[], day?: Date): MergedConstraints` |
 | `./aggregator.ts` | `travelProfiles(people: Participant[]): TravelProfile[]` |
@@ -252,6 +255,34 @@ Two that are easy to call wrongly:
 - **`handleDM` also runs onboarding**, invisibly to A. A first-time user is asked four profile questions (where they head out from, dietary needs, times that never work, favourite places) before any plan questions. A's code is identical either way; the only observable difference is that a first-ever plan takes about eight messages to fill rather than four, so `missing` stays non-empty longer. **Pre-seed the demo users' profiles** and the demo shows the fast path: a returning user finishes in three answers, and the reply says what it reused.
 - **`filterVenues` takes `TravelProfile[]`, not participants.** Build it with `travelProfiles(people)`. Homes and travel caps live inside that array and never reach A's own logic — that is the mechanism behind the privacy claim, not a convention.
 
+### What changed on B's side — read this if the doc looks out of date
+
+Everything below is built, exported and covered by `npm run harness` (51 assertions, green against real Atlas and green with no API keys).
+
+**Types that changed in `contracts.ts`:**
+
+| Change | Why it matters to A |
+|---|---|
+| `UserDoc.profile.defaultBudgetUSD` **removed** | Cost depends on the occasion — brunch vs a fancy dinner — so budget is asked every plan and never persisted. If A referenced it, the compiler will say so |
+| `UserDoc.profile.blackouts?: Blackout[]` **added** | Standing times that never work (`{ days: [2], start: "18:00", end: "23:59" }`). Availability varies per plan; impossibility does not. B clips the per-plan window against these automatically |
+| `StoredMessage` **added** | Every DM is now stored both directions per (planId, userId) |
+| `UserDoc.askedProfile` / `onboardedAt` **added** | Onboarding state. B's, not A's |
+
+**Who owns what inside `users`** — this is the one place a careless write does real damage:
+
+| Field | Owner |
+|---|---|
+| `profile`, `askedProfile`, `onboardedAt` | **B** — written by onboarding and write-back |
+| `activePlanId` | **A**, but only through `store.setActivePlan(userId, planId)` |
+
+`upsertUser` replaces the whole document. Calling it to set `activePlanId` would wipe the profile and onboarding state that `handleDM` just built, and the person would be re-onboarded from scratch mid-demo. `setActivePlan` touches one field and creates the user if absent, so A never needs `upsertUser`.
+
+**Behaviour changes worth knowing:**
+
+- **Money is asked last.** `missingSlots` now returns location, time, travel, dietary, budget in that order, because the product exists precisely because budget is the thing nobody wants to say out loud. `REQUIRED_SLOTS` in `contracts.ts` is still the canonical *set* — ordering is presentation only.
+- **`openStore({ memory: true })`** forces the in-memory store even when `MONGODB_URI` is set. Useful if A wants deterministic tests of her own router without writing to Atlas.
+- **`npm run harness`** runs the whole of B's lane plus a live MongoDB probe; **`npm run backroom`** serves the projector view on port 4321.
+
 ### What A needs from B
 
 **Nothing is outstanding.** `getPlanByJoinCode` and the rest of the plan CRUD are built and covered by assertions, so nothing needs stubbing.
@@ -263,7 +294,7 @@ Two behaviours to rely on rather than reimplement:
 
 ### What has no running code yet
 
-Contracts 1, 2, 3, 4, 6 and 8 are implemented and covered by `npm run harness` — **47 assertions**, green against real Atlas and green with no API keys at all. Contracts 5, 7 and 12 are types with nothing behind them on either side; contract 9 (Nessie) is A's.
+Contracts 1, 2, 3, 4, 6 and 8 are implemented and covered by `npm run harness` — **51 assertions**, green against real Atlas and green with no API keys at all. Contracts 5, 7 and 12 are types with nothing behind them on either side; contract 9 (Nessie) is A's.
 
 **One caveat that matters at 9pm:** the Grok branch of `extract()` has still never executed, because no `XAI_API_KEY` has been set. Everything that passes today runs the offline extractor. Both paths fail *silently* to the fallback, so a wrong model name or a broken prompt looks exactly like success — extraction just gets quietly worse. Set the key and re-run the harness before the end-to-end run.
 
@@ -282,7 +313,7 @@ Contracts 1, 2, 3, 4, 6 and 8 are implemented and covered by `npm run harness` �
 | 9 | Nessie anchor | A writes `budgetCapUSD`, the same field the slot schema defines | 9pm |
 | 12 | `negotiate` / `resumeNegotiation` | **Proposed.** A calls, handles `settled` / `waiting` / `failed`. See `negotiation-protocol.md` | only if built |
 
-**Contract 8 is the one with a silent failure mode:** B seeds ~15 preferred spots per demo user into `users`. A's join flow must not overwrite `users` wholesale — write `plans` and touch only `activePlanId` on the user. With no group chat, `joinCode` is now the *only* participant source, so it is load-bearing rather than a convenience.
+**Contract 8 is the one with a silent failure mode:** `users.profile` is now built by B's onboarding and write-back, not seeded by hand. A's join flow must never write `users` wholesale — use `store.setActivePlan(userId, planId)`, which touches one field. `upsertUser` would wipe the profile and re-onboard the person mid-demo. With no group chat, `joinCode` is now the *only* participant source, so it is load-bearing rather than a convenience.
 
 **Contract 7 is B's critical path.** Agree the `rounds` shape before dinner even if the orchestrator does not exist yet; B builds the entire backroom screen against hand-written fake rounds.
 

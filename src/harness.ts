@@ -291,6 +291,24 @@ async function main(): Promise<void> {
   check("two blackouts parsed from one sentence", tuesday.length === 2, `(${tuesday.length})`);
   await dmStore.close();
 
+  // setActivePlan must not disturb what onboarding built.
+  const joinStore = await openStore({ memory: true });
+  await joinStore.upsertUser({
+    _id: "join-u",
+    phone: "+1555",
+    profile: { home: { lat: 1, lng: 2, label: "Bushwick" }, tastes: ["pizza"], preferredSpots: [] },
+    onboardedAt: "2026-09-26T00:00:00Z",
+    wishlist: [],
+  });
+  await joinStore.setActivePlan("join-u", "plan-z");
+  const joined = await joinStore.getUser("join-u");
+  check("setActivePlan records the plan", joined?.activePlanId === "plan-z");
+  check("and leaves the profile intact", joined?.profile.home?.label === "Bushwick");
+  check("and leaves onboarding state intact", joined?.onboardedAt !== undefined);
+  await joinStore.setActivePlan("brand-new", "plan-z");
+  check("setActivePlan creates a user that does not exist yet", (await joinStore.getUser("brand-new"))?.activePlanId === "plan-z");
+  await joinStore.close();
+
   // Plan CRUD. A's join flow depends on every one of these.
   const planStore = await openStore({ memory: true });
   const plan: PlanDoc = {
