@@ -1,4 +1,4 @@
-import { type Message, type Space, option, poll } from "spectrum-ts";
+import { type Message, type Space, option, poll, richlink } from "spectrum-ts";
 import type { HandleDMResult, Occasion, Venue } from "./contracts.ts";
 import type { PlanDoc } from "./contracts.ts";
 import type { Store } from "./db.ts";
@@ -10,8 +10,8 @@ import { resolveDate } from "./resolve/date.ts";
 import { resolveOccasion } from "./resolve/occasion.ts";
 import { resolveHome } from "./resolve/location.ts";
 import { grokGeocoder } from "./resolve/geocode.ts";
-import { tasteWords, transitLink, venueById } from "./venues.ts";
-import { everyoneIn, planIntro, settledCard, waitingOnOthers, whenLabel } from "./orchestrator/messages.ts";
+import { tasteWords, transitLink, mapsLink, venueById } from "./venues.ts";
+import { everyoneIn, planIntro, settledCard, voteRecap, waitingOnOthers, whenLabel } from "./orchestrator/messages.ts";
 import {
   abandonPlan,
   activePlan,
@@ -54,6 +54,20 @@ function spaceKind(space: unknown): "dm" | "group" | "unknown" {
 
 function senderId(message: Message, space: Space): string {
   return message.sender?.id ?? `space:${space.id}`;
+}
+
+function dmPeer(space: Space): string | null {
+  const id = space.id ?? "";
+  const marked = id.match(/;-;(.+)$/);
+  if (marked?.[1]) return marked[1];
+  return null;
+}
+
+function voterId(message: Message, space: Space): string {
+  const sender = senderId(message, space);
+  const peer = dmPeer(space);
+  if (peer && sender !== peer) return peer;
+  return sender;
 }
 
 function asTrackedSpace(space: Space): { id: string; phone?: string } {
@@ -136,6 +150,7 @@ async function onGo(
   await store.setStatus(plan._id, "negotiating");
   const outcome = await runNegotiation(store, plan);
 
+  rememberSpace(plan._id, userId, asTrackedSpace(space));
   await deliverOutcome(outcome, store, plan, lookup, userId, space);
 }
 
@@ -154,10 +169,14 @@ async function deliverOutcome(
       // Paused, not failed. The plan stays `negotiating`, and the question goes to
       // the one person who could move -- usually not whoever sent `go`.
       const pausedPlan = (await store.getPlan(plan._id)) ?? plan;
-      await sendTo(lookup, spacesFor(pausedPlan), outcome.ask.userId, outcome.ask.question, {
-        userId,
-        space,
-      });
+      await sendTo(
+        lookup,
+        spacesFor(pausedPlan),
+        outcome.ask.userId,
+        outcome.ask.question,
+        { userId, space },
+        pausedPlan._id,
+      );
       if (outcome.ask.userId !== userId) {
         await send(space, "Checking one thing with someone. Back shortly.", "go: paused on a whisper");
       }
@@ -175,28 +194,26 @@ async function deliverOutcome(
   const latest = (await store.getPlan(plan._id)) ?? plan;
   await store.setStatus(plan._id, "proposed");
   rememberCard(plan._id, outcome.text);
-  // The native poll is ON by default now: one has rendered correctly on a real
-  // phone, a tap registers, and taking a vote back off it works. It was off
-  // before that was known, which is why a real run got the numbered text and
-  // nobody could tap anything.
-  //
-  // `UNSAID_POLL=0` forces the numbered text. Keep that in mind on stage: the
-  // fallback below only catches a send that THROWS, so if Spectrum accepts a poll
-  // that iMessage renders as nothing, no fallback fires. The title carries the
-  // reply hint for exactly that case -- a number still works either way.
+  // Photon echoes new polls with an empty title. Spectrum's asPoll then throws
+  // and drops every later tap. src/poll-title-loader.mjs fills that title so
+  // the cache succeeds and poll_option events reach the router.
   const pollEnabled = process.env.UNSAID_POLL !== "0";
   let result = { sent: 0, failed: 0 };
   if (outcome.poll && pollEnabled) {
     try {
-      const card = poll(outcome.poll.title, ...outcome.poll.options.map((o) => option(o)));
+      const title = outcome.poll.title.trim() || "Choose your preferred spot:";
+      const options = outcome.poll.options.map((o) => o.trim()).filter(Boolean);
+      const card = poll(title, ...options.map((o) => option(o)));
       result = await fanOut(lookup, latest, spacesFor(latest), card, { userId, space });
     } catch (err) {
       console.error("poll send failed, falling back to text", err);
       result = { sent: 0, failed: 0 };
     }
   }
-  if (result.sent === 0) {
-    result = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
+  const numbered = await fanOut(lookup, latest, spacesFor(latest), outcome.text, { userId, space });
+  if (result.sent === 0) result = numbered;
+  else {
+    result = { sent: result.sent, failed: result.failed + numbered.failed };
   }
   botLog("go", { planId: plan._id, shortlist: outcome.shortlist, poll: pollEnabled, ...result });
   if (result.failed > 0 && result.sent > 0) {
@@ -487,9 +504,13 @@ async function announceSettled(
   for (const userId of plan.participants) {
     const home = (await store.getSlots(plan._id, userId)).home?.value ?? null;
     const card = settledCard(venue, { time, occasion: plan.occasion, date: plan.date, tally, from: home });
-    const ok = await sendTo(lookup, spacesFor(plan), userId, card, from);
-    if (ok) sent += 1;
-    else failed += 1;
+    const ok = await sendTo(lookup, spacesFor(plan), userId, card, from, plan._id);
+    if (ok) {
+      await sendTo(lookup, spacesFor(plan), userId, richlink(mapsLink(venue)), from, plan._id);
+      sent += 1;
+    } else {
+      failed += 1;
+    }
   }
   return { sent, failed };
 }
@@ -502,6 +523,7 @@ async function castVote(
   userId: string,
   venueId: string,
 ): Promise<void> {
+  rememberSpace(plan._id, userId, asTrackedSpace(space));
   await store.recordVote(plan._id, userId, venueId);
   const latest = (await store.getPlan(plan._id)) ?? plan;
   const votes = latest.votes ?? {};
@@ -517,9 +539,10 @@ async function castVote(
   }
 
   const { winner, counts } = tallyVotes(votes, shortlist);
+  const recap = voteRecap(shortlist, counts, need);
   const venue = winner ? venueById(winner) : undefined;
   if (!venue || !winner) {
-    await send(space, `${name} — got it.`, "vote recorded, no winner");
+    await send(space, `${name} — got it.\n\n${recap}`, "vote recorded, no winner");
     return;
   }
 
@@ -537,8 +560,9 @@ async function castVote(
       latest,
       spacesFor(latest),
       [
-        `${split} split — no clear winner.`,
+        recap,
         "",
+        `${split} split — no clear winner.`,
         `${venue.name} edges it on everyone's scores.`,
         "",
         `Tap 👍 to take it, or reply with a different number to switch your pick.`,
@@ -551,7 +575,7 @@ async function castVote(
 
   await store.setStatus(plan._id, "confirmed");
   const settled = (await store.getPlan(plan._id)) ?? latest;
-  const tally = top === need ? "Unanimous." : `${top} of ${need} votes.`;
+  const tally = `${top === need ? "Unanimous." : `${top} of ${need} votes.`}\n${recap}`;
   const result = await announceSettled(store, lookup, settled, venue, tally, { userId, space });
   botLog("vote: settled", { winner, counts, ...result });
 }
@@ -605,6 +629,25 @@ async function onConfirm(
   }
 }
 
+function pollChoiceLabel(content: unknown): { label: string; index?: number } {
+  const c = content as {
+    title?: unknown;
+    option?: unknown;
+    poll?: { title?: unknown; options?: unknown[] };
+  };
+  const option = c.option;
+  if (typeof option === "string" && option.trim()) return { label: option.trim() };
+  if (option && typeof option === "object") {
+    const o = option as Record<string, unknown>;
+    const label = [o.title, o.text, o.label, o.name].find((v) => typeof v === "string" && v.trim());
+    const index = typeof o.index === "number" ? o.index : undefined;
+    if (typeof label === "string") return { label: label.trim(), index };
+    if (index != null) return { label: "", index };
+  }
+  if (typeof c.title === "string" && c.title.trim()) return { label: c.title.trim() };
+  return { label: "" };
+}
+
 function reactionEmoji(message: Message): string | null {
   const content = message.content as { type?: string; emoji?: unknown };
   if (content.type !== "reaction" || typeof content.emoji !== "string") return null;
@@ -618,6 +661,14 @@ export async function routeMessage(
   lookup: SpaceLookup,
 ): Promise<void> {
   if (message.direction === "outbound") return;
+
+  if (message.content.type === "read") return;
+
+  botLog("inbound message", {
+    type: message.content.type,
+    direction: message.direction,
+    keys: Object.keys(message.content),
+  });
 
   if (spaceKind(space) === "group") {
     botLog("skipping group message", space.id);
@@ -639,17 +690,16 @@ export async function routeMessage(
   // A tap on a native poll. Spectrum delivers it as its own content kind rather
   // than as text, so without this the vote is silently dropped.
   if (message.content.type === "poll_option") {
-    const userId = senderId(message, space);
-    const choice = message.content as { selected?: boolean; title?: string; option?: { title?: string } };
-    const title = choice.option?.title ?? choice.title ?? "";
-    botLog("inbound poll vote", { userId, title, selected: choice.selected });
+    const userId = voterId(message, space);
+    const choice = message.content as { selected?: boolean };
+    const { label, index } = pollChoiceLabel(message.content);
+    botLog("inbound poll vote", { userId, title: label, index, selected: choice.selected });
 
     const plan = await activePlan(store, userId);
     if (!plan || plan.status !== "proposed") return;
 
-    // Un-tapping an option withdraws the vote. Treating it as a no-op left the
-    // old choice standing, so the tally disagreed with what the poll showed.
     if (choice.selected === false) {
+      rememberSpace(plan._id, userId, asTrackedSpace(space));
       await store.removeVote(plan._id, userId);
       const left = plan.participants.length - Object.keys((await store.getPlan(plan._id))?.votes ?? {}).length;
       await send(
@@ -659,14 +709,21 @@ export async function routeMessage(
       );
       return;
     }
-    if (!title) return;
-    const picked = parseVote(title, plan.shortlist ?? []);
+
+    const shortlist = plan.shortlist ?? [];
+    const picked =
+      parseVote(label, shortlist) ??
+      (index != null ? (shortlist[index] ?? shortlist[index - 1]) : null);
     if (picked) {
       await castVote(space, store, lookup, plan, userId, picked);
       return;
     }
-    // A tap we cannot match to an option would otherwise vanish silently.
-    const names = (plan.shortlist ?? []).map((id, i) => `${i + 1}. ${venueById(id)?.name ?? id}`).join("\n");
+    botLog("poll vote unmatched payload", {
+      keys: Object.keys(message.content),
+      title: label,
+      index,
+    });
+    const names = shortlist.map((id, i) => `${i + 1}. ${venueById(id)?.name ?? id}`).join("\n");
     await send(space, `I didn't catch which one that was. Reply with a number:\n\n${names}`, "poll vote unmatched");
     return;
   }

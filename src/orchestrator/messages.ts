@@ -1,5 +1,5 @@
 import type { Candidate, FailedOn, TimeWindow , Occasion } from "../contracts.ts";
-import { mapsLink, priceTier, transitLink } from "../venues.ts";
+import { priceTier, transitLink, venueById } from "../venues.ts";
 import type { Home, Venue } from "../contracts.ts";
 
 export function pickTime(window: TimeWindow): string {
@@ -63,8 +63,6 @@ export function settledCard(
     `Settled: ${venue.name}`,
     `${describeVenue(venue)} · ${venue.neighborhood} · about $${venue.estCostUSD}`,
     `${when}${opts.tally ? ` · ${opts.tally}` : ""}`,
-    "",
-    mapsLink(venue),
   ];
   if (opts.from) {
     lines.push(`Transit from ${opts.from.label}: ${transitLink(venue, opts.from)}`);
@@ -104,6 +102,14 @@ export function everyoneIn(cardText?: string): string {
   const firstLine = cardText?.split("\n")[0]?.trim();
   if (firstLine) return `Everyone's in. ${firstLine}. See you there.`;
   return "Everyone's in. You're all set.";
+}
+
+export function voteRecap(shortlist: string[], counts: Record<string, number>, need: number): string {
+  const lines = shortlist.map((id) => {
+    const n = counts[id] ?? 0;
+    return `• ${venueById(id)?.name ?? id} — ${n} of ${need}`;
+  });
+  return ["Votes:", ...lines].join("\n");
 }
 
 const AREA: Record<FailedOn | "time", string> = {

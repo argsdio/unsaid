@@ -116,11 +116,7 @@ async function toOutcome(
     shortlist: result.shortlist,
     time,
     poll: {
-      // The hint is in the title because it is the one line that survives even if
-      // the options render badly: a reply of "2" is read the same as a tap.
-      title: `${when} at ${time} — tap one, or reply ${choices.join("/")}`,
-      // Price in the label so the native poll carries the same information as
-      // the text list. parseVote still matches these by name.
+      title: "Choose your preferred spot:",
       options: venues.map((v) => `${v.name} · $${v.estCostUSD}`),
     },
     text: [`These all work for everyone, ${when.toLowerCase()} at ${time}:`, "", ...lines, "", replyHint].join("\n"),
