@@ -4,13 +4,25 @@ This is a [Spectrum](https://photon.codes/docs/spectrum-ts) app, pinned to `spec
 
 ## Working in this project
 
-- Run the app with `npm run start`.
+- Run the app with `npm run start`. **Only one person runs this at a time** — two processes on the same `PROJECT_ID` both receive every message.
+- `npm run harness` runs teammate B's whole lane end to end plus its assertions. It is the fastest way to check nothing is broken, and it needs no phones.
+- `npm run backroom` serves the projector screen on http://localhost:4321.
 - Add providers by importing them in `src/index.ts` and listing them in the `Spectrum({ providers: [...] })` config.
 - Outgoing message content uses the builders documented in the skill (text, attachment, voice, contact, richlink, poll, group, custom).
 
 ## Environment
 
-This project reads secrets from `.env` (gitignored). **Do not read, write, or echo `.env`** — it contains credentials.
+This project reads secrets from `.env` (gitignored). **Do not read, write, or echo `.env`** — it contains credentials. `.env.example` lists every variable and is safe to read.
+
+| Variable | Needed for | Without it |
+|---|---|---|
+| `PROJECT_ID` / `PROJECT_SECRET` | Spectrum Cloud | the app cannot start |
+| `MONGODB_URI` / `MONGODB_DB` | shared state | the store runs in memory and dies on restart |
+| `XAI_API_KEY` / `GROK_MODEL` | Grok | deterministic scoring and offline slot extraction |
+
+**Both teammates must use the same `MONGODB_URI` and the same Photon project.** The two lanes only meet through the database: A's router writes plans and rounds, B's backroom screen reads them. Separate clusters means each half works alone and nothing works together, with no error to explain why.
+
+Everything degrades rather than breaking, which also makes the failure quiet: a missing key produces worse behaviour, not a crash.
 
 If startup fails with an authentication error, tell the user to verify their `PROJECT_ID` / `PROJECT_SECRET` at the [Photon dashboard](https://app.photon.codes).
 
