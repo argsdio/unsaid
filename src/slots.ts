@@ -129,7 +129,7 @@ function assumeDefault(slots: Slots, slot: RequiredSlot, day: Date): { slots: Sl
 
 // Increments the ask count for whatever is next, rephrases on the second ask,
 // and assumes a default past MAX_ASKS so the conversation always advances.
-function advance(slots: Slots, day: Date): { slots: Slots; reply: string } {
+function advance(slots: Slots, day: Date): { slots: Slots; reply: string; complete?: true } {
   let next = slots;
   const notes: string[] = [];
 
@@ -154,7 +154,7 @@ function advance(slots: Slots, day: Date): { slots: Slots; reply: string } {
   }
 
   const prefix = notes.length ? `${notes.join(", and ")}. ` : "";
-  return { slots: next, reply: prefix + DONE };
+  return { slots: next, reply: prefix + DONE, complete: true };
 }
 
 export function missingSlots(slots: Slots): RequiredSlot[] {
@@ -381,6 +381,29 @@ export async function handleDM(
   await store.setSlots(input.planId, input.userId, resolved);
   if (user) await writeBackProfile(store, user, resolved);
 
+  // "Got everything I need" was the answer to every later message, forever, and
+  // after a failed `go` it was also untrue -- nothing was being worked out. Once
+  // this person is done, say what is actually outstanding.
+  let closing = stepped.reply;
+  if (stepped.complete && planDoc) {
+    const others = planDoc.participants.filter((id) => id !== input.userId);
+    let waiting = 0;
+    for (const other of others) {
+      if (missingSlots(await store.getSlots(input.planId, other)).length > 0) waiting += 1;
+    }
+    const seed = Math.floor(history.length / 2);
+    closing =
+      waiting > 0
+        ? [
+            `You're all set. Waiting on ${waiting} more.`,
+            `Nothing else from you — ${waiting} still to answer.`,
+          ][seed % 2]!
+        : [
+            `Everyone's answered. Whoever started it can send "go".`,
+            `All in. Send "go" when you're ready, or "status" to see the group's limits.`,
+          ][seed % 2]!;
+  }
+
   const recall = seeded.used.length > 0 ? `Using ${seeded.used.join(" and ")} from your profile. ` : "";
-  return reply(recall + heard + stepped.reply, resolved, missingSlots(resolved));
+  return reply(recall + heard + closing, resolved, missingSlots(resolved));
 }

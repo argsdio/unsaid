@@ -552,6 +552,48 @@ async function main(): Promise<void> {
 
   await negStore.close();
 
+  // The blocker reported must be the one that is actually blocking. Budget is
+  // checked first inside filterVenues, so it hogs the rejection count even when
+  // an unsatisfiable dietary set is the real wall.
+  const impossible = await asPeople([
+    ["i1", { homeRaw: "east village", budgetRaw: "$25 tops", dietaryRaw: "vegetarian", windowRaw: "7pm", travelRaw: "1 hr" }],
+    ["i2", { homeRaw: "williamsburg", budgetRaw: "like 40", dietaryRaw: "no nuts", windowRaw: "after 7", travelRaw: "45 min" }],
+  ]);
+  const impossibleRun = await negotiate(negStore, "neg-imp", impossible, day);
+  check(
+    "an unsatisfiable diet is named as the blocker, not the budget",
+    impossibleRun.status === "failed" && impossibleRun.binding?.kind === "dietary",
+    impossibleRun.status === "failed" ? JSON.stringify(impossibleRun.binding) : "",
+  );
+
+  // Once somebody has answered everything, later messages must not loop one line
+  // -- and after a failed `go` that line also claimed work was happening.
+  const doneStore = await openStore({ memory: true });
+  await doneStore.createPlan({
+    _id: "done", joinCode: "DN01", participants: ["d1", "d2"], status: "collecting", slots: {},
+  });
+  for (const u of ["d1", "d2"]) {
+    await doneStore.upsertUser({
+      _id: u, phone: u, profile: { tastes: [], preferredSpots: [] }, onboardedAt: "now", wishlist: [],
+    });
+    for (const text of ["dinner?", "east village", "7pm", "1 hr", "vegetarian", "$25"]) {
+      await handleDM({ planId: "done", userId: u, text }, doneStore);
+    }
+  }
+  const afterDone: string[] = [];
+  for (const text of ["ok", "cool", "anything else"]) {
+    afterDone.push((await handleDM({ planId: "done", userId: "d1", text }, doneStore)).reply);
+  }
+  check(
+    "a finished participant is told what is actually outstanding",
+    afterDone.every((r) => !r.includes("Working it out")),
+    afterDone[0]?.slice(0, 40),
+  );
+  let doneRepeats = 0;
+  for (let i = 1; i < afterDone.length; i++) if (afterDone[i] === afterDone[i - 1]) doneRepeats++;
+  check("and never the same line twice running", doneRepeats === 0);
+  await doneStore.close();
+
   // Meta-turns. A question is not an answer -- previously nine asides walked a
   // person through onboarding and all the way to "got everything I need".
   check(

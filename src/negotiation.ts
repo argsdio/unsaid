@@ -119,6 +119,17 @@ function shuffle<T>(items: T[]): T[] {
   return out;
 }
 
+// Budget and travel can be relaxed; dietary cannot. So if lifting both of them
+// entirely still leaves nothing, no amount of flexing will help and the real
+// blocker is the dietary set. Saying "the clash is budget" there sends people to
+// raise a number that was never the problem.
+function trueBlocker(agents: Agent[], day: Date, fallback: Objection | null): Objection | null {
+  const unlimited = agents.map((a) => flex(flex(a, "budgetCapUSD", 100000), "maxTravelMin", 100000));
+  if (survivorCount(unlimited, day) > 0) return fallback;
+  const tag = mergeConstraints(unlimited.map((a) => a.participant), day).requiredDietary[0];
+  return tag ? { kind: "dietary", tag } : fallback;
+}
+
 function survivorCount(agents: Agent[], day: Date): number {
   const parts = agents.map((a) => a.participant);
   return filterVenues(VENUES, mergeConstraints(parts, day), travelProfiles(parts)).survivors.length;
@@ -462,7 +473,13 @@ export async function negotiate(
       const shortlist = rank(filtered.survivors, positions, SHORTLIST);
       return done({ status: "settled", shortlist, merged, rounds });
     }
-    return done({ status: "failed", reason: "deadlock", binding: objection, merged, rounds });
+    return done({
+        status: "failed",
+        reason: "deadlock",
+        binding: trueBlocker(agents, day, objection),
+        merged,
+        rounds,
+      });
   }
 
   const parts = agents.map((a) => a.participant);
@@ -476,7 +493,7 @@ export async function negotiate(
   return done({
     status: "failed",
     reason: "round-cap",
-    binding: lastObjection,
+    binding: trueBlocker(agents, day, lastObjection),
     merged: finalMerged,
     rounds,
   });

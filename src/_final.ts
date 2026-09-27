@@ -1,0 +1,35 @@
+import "dotenv/config";
+import { openStore } from "./db.ts";
+import { routeMessage } from "./router.ts";
+const store = await openStore();
+const RUN = Date.now().toString(36);
+const A = `+1555${RUN.slice(-5)}1`, B = `+1555${RUN.slice(-5)}2`;
+const sent: Record<string, string[]> = { [A]: [], [B]: [] };
+const space = (p: string) => ({ id: `dm-${p}`, type: "dm" as const, phone: p, async responding(f: () => Promise<void>) { await f(); }, async send(t: string) { sent[p]!.push(t); } });
+const msg = (p: string, t: string) => ({ direction: "inbound" as const, content: { type: "text" as const, text: t }, sender: { id: p } });
+const lookup = { async get(id: string) { const ph = id.replace("dm-", ""); return space(ph) as never; } } as never;
+const log: string[] = [];
+async function say(p: string, t: string) {
+  const n = sent[p]!.length;
+  await routeMessage(space(p) as never, msg(p, t) as never, store, lookup);
+  const out = sent[p]!.slice(n).join("\n") || "(NOTHING)";
+  log.push(`## ${p === A ? "A" : "B"} > ${t}`);
+  for (const l of out.split("\n")) log.push(`##     ${l}`);
+  return out;
+}
+await say(A, "dinner friday?");
+for (const t of ["60th and lex", "vegetarian", "none", "none", "7pm", "1 hr", "$25 tops"]) await say(A, t);
+const planId = (await store.getUser(A))!.activePlanId!;
+await say(B, `JOIN ${(await store.getPlan(planId))!.joinCode}`);
+for (const t of ["williamsburg", "no nuts", "none", "joe's pizza", "after 7", "45 min", "like 40"]) await say(B, t);
+await say(A, "status");
+await say(A, "go");
+await say(A, "what kind of democracy is this");
+await say(A, "2");
+await say(B, "2");
+const p = (await store.getPlan(planId))!;
+log.push(`## FINAL status=${p.status} date=${p.date} votes=${JSON.stringify(p.votes)}`);
+for (const u of [A, B]) await store.deleteUser(u);
+await store.deletePlan(planId);
+console.log(log.join("\n"));
+await store.close();
