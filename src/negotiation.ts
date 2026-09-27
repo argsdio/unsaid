@@ -2,10 +2,11 @@ import type {
   Concession,
   MergedConstraints,
   NegotiationResult,
-  NegotiationRound,
   Objection,
   Position,
+  Rejection,
   RequiredSlot,
+  RoundLog,
   Survivor,
 } from "./contracts.ts";
 import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "./aggregator.ts";
@@ -176,6 +177,47 @@ function bestRelaxation(
   return best;
 }
 
+// Shaped as RoundLog so A appends it unchanged and the backroom screen keeps its
+// score bars, while gaining the narration and the objections.
+function toRoundLog(
+  planId: string,
+  round: number,
+  survivors: Survivor[],
+  rejected: Rejection[],
+  positions: Position[][],
+  objections: Objection[],
+  concessions: Concession[],
+  narration: string,
+  settledOn?: string,
+): RoundLog {
+  const scoresFor = (venueId: string) =>
+    positions.map((list) => list.find((p) => p.venueId === venueId)?.score ?? 0);
+  return {
+    planId,
+    round,
+    at: new Date().toISOString(),
+    narration,
+    objections,
+    concessions,
+    ...(settledOn ? { settledOn } : {}),
+    candidates: [
+      ...survivors.map((s) => ({
+        venueId: s.venueId,
+        passed: positions.every(
+          (list) => list.find((p) => p.venueId === s.venueId)?.move === "accept",
+        ),
+        scores: scoresFor(s.venueId),
+      })),
+      ...rejected.map((r) => ({
+        venueId: r.venueId,
+        passed: false,
+        failedOn: r.failedOn,
+        scores: [] as number[],
+      })),
+    ],
+  };
+}
+
 async function positionsFor(agents: Agent[], survivors: Survivor[]): Promise<Position[][]> {
   return Promise.all(
     agents.map(async (agent) => {
@@ -220,6 +262,7 @@ function bestWorstCase(survivors: Survivor[], positions: Position[][]): string |
  */
 export async function negotiate(
   store: Store,
+  planId: string,
   people: Participant[],
   day: Date = new Date(),
 ): Promise<NegotiationResult> {
@@ -236,7 +279,7 @@ export async function negotiate(
     }),
   );
 
-  const rounds: NegotiationRound[] = [];
+  const rounds: RoundLog[] = [];
   let lastObjection: Objection | null = null;
 
   for (let round = 1; round <= MAX_ROUNDS; round++) {
@@ -260,14 +303,13 @@ export async function negotiate(
       filtered.survivors.length > 0 ? unanimous(filtered.survivors, positions) : undefined;
 
     if (settledOn) {
-      rounds.push({
-        round,
-        proposals: filtered.survivors.map((s) => s.venueId),
-        objections: [],
-        concessions: [],
-        narration: narrate(round, filtered.survivors.length, settledOn, objection, []),
-        settledOn,
-      });
+      rounds.push(
+        toRoundLog(
+          planId, round, filtered.survivors, filtered.rejected, positions, [], [],
+          narrate(round, filtered.survivors.length, settledOn, objection, []),
+          settledOn,
+        ),
+      );
       return { status: "settled", venueId: settledOn, rounds };
     }
 
@@ -282,13 +324,13 @@ export async function negotiate(
       : objection;
     if (relaxation) agents = relaxation.agents;
 
-    rounds.push({
-      round,
-      proposals: filtered.survivors.map((s) => s.venueId),
-      objections: shuffle(objection ? [objection] : []),
-      concessions,
-      narration: narrate(round, filtered.survivors.length, undefined, asked ?? objection, concessions),
-    });
+    rounds.push(
+      toRoundLog(
+        planId, round, filtered.survivors, filtered.rejected, positions,
+        shuffle(objection ? [objection] : []), concessions,
+        narrate(round, filtered.survivors.length, undefined, asked ?? objection, concessions),
+      ),
+    );
 
     // Nobody willing or able to move, and no agreement: further rounds are identical.
     if (concessions.length === 0) {

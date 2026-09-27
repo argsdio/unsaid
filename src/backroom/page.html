@@ -47,6 +47,9 @@
   .hidden { display: none; }
   .divider { height: 1px; background: var(--line); margin: 14px 0 4px; }
   .summary { color: var(--dim); font-size: 14px; padding-top: 12px; font-style: italic; }
+  .turn { font-size: 15px; padding: 6px 0 6px 12px; border-left: 2px solid var(--line); color: var(--dim); }
+  .turn.last { color: var(--text); border-left-color: var(--accent); }
+  #transcript { margin-bottom: 18px; }
 </style>
 </head>
 <body>
@@ -58,6 +61,7 @@
 <div class="grid">
   <section class="panel">
     <h2>Negotiation</h2>
+    <div id="transcript"></div>
     <div id="candidates"></div>
   </section>
 
@@ -92,6 +96,15 @@
   // of eliminations get struck out for the visible-crossing-out beat, and the
   // rest collapse into one counted line.
   const CROSSOUTS_SHOWN = 6;
+
+  // The round-by-round argument. The candidate rows below show only the latest
+  // round, so without this the multi-round negotiation is invisible.
+  function renderTranscript(rounds) {
+    return rounds
+      .filter((r) => r.narration)
+      .map((r, i, all) => `<div class="turn ${i === all.length - 1 ? "last" : ""}">${esc(r.narration)}</div>`)
+      .join("");
+  }
 
   function renderCandidates(rounds) {
     const round = rounds[rounds.length - 1];
@@ -162,6 +175,7 @@
     try {
       const res = await fetch("/api/state" + location.search);
       const state = await res.json();
+      document.getElementById("transcript").innerHTML = renderTranscript(state.rounds);
       document.getElementById("candidates").innerHTML = renderCandidates(state.rounds);
       document.getElementById("reveal").innerHTML = renderReveal(state.said, state.merged);
       document.getElementById("status").textContent =

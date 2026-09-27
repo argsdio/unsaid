@@ -435,20 +435,20 @@ async function main(): Promise<void> {
       hedged[1]?.slots.sensitive?.includes("budgetCapUSD") !== true,
   );
 
-  const hedgedRun = await negotiate(negStore, hedged, day);
+  const hedgedRun = await negotiate(negStore, "neg-h", hedged, day);
   const budgetConcessions = hedgedRun.rounds.flatMap((r) =>
-    r.concessions.filter((c) => c.kind === "budget"),
+    (r.concessions ?? []).filter((c) => c.kind === "budget"),
   );
   check(
     "a hedged budget is never asked to flex",
     budgetConcessions.length === 0,
     JSON.stringify(budgetConcessions),
   );
-  check("so it relaxes something else instead", hedgedRun.rounds.some((r) => r.concessions.length > 0));
+  check("so it relaxes something else instead", hedgedRun.rounds.some((r) => (r.concessions ?? []).length > 0));
   check("and still reaches an answer", hedgedRun.status === "settled");
 
   // Privacy: an objection names a constraint, never a person.
-  const allMoves = hedgedRun.rounds.flatMap((r) => [...r.objections, ...r.concessions]);
+  const allMoves = hedgedRun.rounds.flatMap((r) => [...(r.objections ?? []), ...(r.concessions ?? [])]);
   check(
     "no objection or concession carries an identity",
     allMoves.every((m) => !("agent" in m) && !("userId" in m)),
@@ -458,7 +458,7 @@ async function main(): Promise<void> {
     ["s1", { homeRaw: "east village", budgetRaw: "$9 max", dietaryRaw: "vegan", windowRaw: "after 7", travelRaw: "10 min tops" }],
     ["s2", { homeRaw: "flushing", budgetRaw: "$10 tops", dietaryRaw: "halal", windowRaw: "after 7", travelRaw: "10 min max" }],
   ]);
-  const stuckRun = await negotiate(negStore, stuck, day);
+  const stuckRun = await negotiate(negStore, "neg-s", stuck, day);
   check(
     "nobody willing to move deadlocks honestly rather than looping",
     stuckRun.status === "failed" && stuckRun.reason === "deadlock",
@@ -469,13 +469,27 @@ async function main(): Promise<void> {
     ["e1", { homeRaw: "east village", budgetRaw: "$14", dietaryRaw: "vegetarian", windowRaw: "after 7", travelRaw: "30 min" }],
     ["e2", { homeRaw: "west village", budgetRaw: "$25", dietaryRaw: "i eat everything", windowRaw: "after 7", travelRaw: "30 min" }],
   ]);
-  const easyRun = await negotiate(negStore, easy, day);
+  const easyRun = await negotiate(negStore, "neg-e", easy, day);
   check("a workable group settles", easyRun.status === "settled");
   check("rounds are capped at three", easyRun.rounds.length <= 3, `(${easyRun.rounds.length})`);
   check(
     "every round explains itself",
-    easyRun.rounds.every((r) => r.narration.length > 20 && r.narration.startsWith("Round")),
+    easyRun.rounds.every((r) => (r.narration ?? "").length > 20 && (r.narration ?? "").startsWith("Round")),
   );
+  // The rounds must append with store.appendRound and read back through the
+  // screen's own state builder -- that is A's entire integration.
+  for (const round of easyRun.rounds) await negStore.appendRound(round);
+  const negState = await buildState(negStore, "neg-e");
+  check("negotiation rounds append and read back", negState.rounds.length === easyRun.rounds.length);
+  check(
+    "and the narration survives the round trip to the screen",
+    negState.rounds.every((r) => (r.narration ?? "").startsWith("Round")),
+  );
+  check(
+    "candidate rows keep their scores, so the screen still draws bars",
+    negState.rounds[0]?.candidates.some((c) => c.passed || c.scores.length > 0) === true,
+  );
+
   await negStore.close();
 
   // The status command: the thing that makes every other bug debuggable.

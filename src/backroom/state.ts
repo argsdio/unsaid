@@ -9,6 +9,8 @@ export type BackroomState = {
     planId: string;
     round: number;
     at: string;
+    narration?: string;
+    settledOn?: string;
     candidates: {
       venueId: string;
       passed: boolean;

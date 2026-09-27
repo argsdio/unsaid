@@ -135,23 +135,15 @@ export type Position = {
   score: number;
 };
 
-export type NegotiationRound = {
-  round: number;
-  proposals: string[];
-  // Unattributed and shuffled, so array order cannot be read as identity.
-  objections: Objection[];
-  concessions: Concession[];
-  narration: string;
-  settledOn?: string;
-};
-
+// Rounds are RoundLog so they can be appended with store.appendRound and read by
+// the backroom screen without conversion.
 export type NegotiationResult =
-  | { status: "settled"; venueId: string; rounds: NegotiationRound[] }
+  | { status: "settled"; venueId: string; rounds: RoundLog[] }
   | {
       status: "failed";
       reason: "no-overlap" | "deadlock" | "round-cap";
       binding: Objection | null;
-      rounds: NegotiationRound[];
+      rounds: RoundLog[];
     };
 
 // Contract 5 (A -> B). Batched: one payload per person per round.
@@ -176,6 +168,12 @@ export type RoundLog = {
   round: number;
   at: string;
   candidates: { venueId: string; passed: boolean; failedOn?: FailedOn; scores: number[] }[];
+  // Added for the multi-round negotiation. Optional so A's existing single-round
+  // writes keep type-checking unchanged.
+  narration?: string;
+  objections?: Objection[];
+  concessions?: Concession[];
+  settledOn?: string;
 };
 
 export type PlanStatus = "collecting" | "negotiating" | "proposed" | "confirmed";
