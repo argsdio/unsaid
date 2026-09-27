@@ -65,16 +65,68 @@ export function extractOffline(text: string, expecting?: ExtractContext["expecti
   return raw;
 }
 
+const STRING_FIELDS = [
+  "budgetRaw",
+  "dietaryRaw",
+  "windowRaw",
+  "blackoutRaw",
+  "homeRaw",
+  "travelRaw",
+] as const;
+
+// `strict: false` is required so the model can omit fields, which means nothing
+// enforces the schema. A number where a string belongs would throw inside a
+// resolver, well past any try/catch here.
+function coerce(parsed: unknown): RawSlots {
+  const out: RawSlots = {};
+  if (!parsed || typeof parsed !== "object") return out;
+  const obj = parsed as Record<string, unknown>;
+
+  for (const key of STRING_FIELDS) {
+    const value = obj[key];
+    if (typeof value === "string" && value.trim()) out[key] = value;
+  }
+  for (const key of ["tags", "namedSpots"] as const) {
+    const value = obj[key];
+    if (!Array.isArray(value)) continue;
+    const strings = value.filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+    if (strings.length) out[key] = strings;
+  }
+  return out;
+}
+
+// Grok is more precise about which phrase belongs to which slot; the offline
+// resolvers are better at not missing one. Grok wins every field it fills.
+function mergeExtractions(primary: RawSlots, fallback: RawSlots): RawSlots {
+  const merged: RawSlots = { ...fallback };
+  for (const [key, value] of Object.entries(primary)) {
+    if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+  }
+  return merged;
+}
+
+// Location needs an async resolver, so it sits outside extractOffline. Used by
+// both the no-key path and the failure path, so a Grok outage degrades to
+// exactly the same quality as running with no key at all.
+async function offlineExtraction(
+  text: string,
+  expecting: ExtractContext["expecting"],
+): Promise<RawSlots> {
+  const raw = extractOffline(text, expecting);
+  if (!raw.homeRaw && (await resolveHome(text)).value !== null) raw.homeRaw = text;
+  return raw;
+}
+
 export async function extract(text: string, ctx: ExtractContext = {}): Promise<RawSlots> {
   const client = grok();
-  if (!client) {
-    const offline = extractOffline(text, ctx.expecting);
-    if (!offline.homeRaw && (await resolveHome(text)).value !== null) offline.homeRaw = text;
-    return offline;
-  }
+  const offline = await offlineExtraction(text, ctx.expecting);
+  if (!client) return offline;
 
   try {
-    const recent = (ctx.history ?? []).slice(-6);
+    // The caller stores the inbound message before reading history, so drop it
+    // rather than sending the same turn twice.
+    const prior = (ctx.history ?? []).filter((m) => !(m.direction === "in" && m.text === text));
+    const recent = prior.slice(-6);
     const response = await client.chat.completions.create({
       model: GROK_MODEL,
       response_format: {
@@ -94,9 +146,17 @@ export async function extract(text: string, ctx: ExtractContext = {}): Promise<R
       ],
     });
     const content = response.choices[0]?.message.content;
-    if (!content) return extractOffline(text, ctx.expecting);
-    return JSON.parse(content) as RawSlots;
-  } catch {
-    return extractOffline(text, ctx.expecting);
+    if (!content) {
+      console.warn(`[extract] ${GROK_MODEL} returned no content; using offline extraction`);
+      return offline;
+    }
+    return mergeExtractions(coerce(JSON.parse(content)), offline);
+  } catch (error) {
+    // Loud on purpose. A wrong model name or a rejected schema is otherwise
+    // indistinguishable from success, with extraction just quietly worse.
+    console.warn(
+      `[extract] ${GROK_MODEL} failed, using offline extraction: ${(error as Error).message}`,
+    );
+    return offline;
   }
 }

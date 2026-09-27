@@ -188,6 +188,10 @@ export async function handleDM(
   day: Date = new Date(),
 ): Promise<HandleDMResult> {
   const now = new Date().toISOString();
+
+  // History is read BEFORE storing this message, so extraction sees what came
+  // before rather than the current turn twice.
+  const history = await store.listMessages(input.planId, input.userId);
   await store.appendMessage(input.planId, input.userId, {
     at: now,
     direction: "in",
@@ -196,7 +200,6 @@ export async function handleDM(
 
   const stored = await store.getUser(input.userId);
   const existing = await store.getSlots(input.planId, input.userId);
-  const history = await store.listMessages(input.planId, input.userId);
 
   async function reply(text: string, slots: Slots, missing: RequiredSlot[]): Promise<HandleDMResult> {
     await store.appendMessage(input.planId, input.userId, { at: now, direction: "out", text });

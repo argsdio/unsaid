@@ -91,7 +91,10 @@ export async function scoreCandidates(
     });
 
     const raw = response.choices[0]?.message.content;
-    if (!raw) return local;
+    if (!raw) {
+      console.warn(`[score] ${GROK_MODEL} returned no content; using deterministic scoring`);
+      return local;
+    }
     const parsed = JSON.parse(raw) as { scores?: { venueId: string; score: number }[] };
     const byId = new Map((parsed.scores ?? []).map((s) => [s.venueId, s.score]));
 
@@ -108,7 +111,10 @@ export async function scoreCandidates(
         ...(score < WHISPER_FLOOR ? { needsMyHuman: true as const } : {}),
       };
     });
-  } catch {
+  } catch (error) {
+    console.warn(
+      `[score] ${GROK_MODEL} failed, using deterministic scoring: ${(error as Error).message}`,
+    );
     return local;
   }
 }
