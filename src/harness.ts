@@ -101,6 +101,14 @@ function bestWorstCase(
 async function main(): Promise<void> {
   const day = new Date();
 
+  // The conversation and pipeline checks assert accumulation, selection and
+  // storage logic -- not extraction quality -- so they run on the offline
+  // extractor. That keeps them deterministic and turns an 84-second suite back
+  // into an instant one. The Grok path gets its own checks at the end, with the
+  // key restored.
+  const GROK_KEY = process.env.XAI_API_KEY;
+  delete process.env.XAI_API_KEY;
+
   const people: Participant[] = [];
   for (const user of USERS) {
     people.push({ userId: user.userId, slots: await resolveSlots(user.dms, {}, undefined, day) });
@@ -404,7 +412,9 @@ async function main(): Promise<void> {
   // message to each matching slot, so a shorter value proves the model returned
   // a real span. Without this, an empty Grok response merges away to offline and
   // every other check still passes.
-  if (process.env.XAI_API_KEY) {
+  if (GROK_KEY) process.env.XAI_API_KEY = GROK_KEY;
+
+  if (GROK_KEY) {
     const sentence = "im in bushwick and $25 tops, nothing with nuts";
     const spans = await extract(sentence, {});
     check(
