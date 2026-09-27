@@ -1,4 +1,5 @@
-import type { Blackout, Slot, TimeWindow } from "../contracts.ts";
+import type { Blackout, Occasion, Slot, TimeWindow } from "../contracts.ts";
+import { WINDOWS } from "./occasion.ts";
 import { normalise } from "./gazetteer.ts";
 
 // Naive local ISO (no timezone suffix). Everyone is in one room in one city
@@ -11,16 +12,14 @@ function iso(day: Date, minutes: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00`;
 }
 
-const EVENING_START = 17 * 60;
-const EVENING_END = 23 * 60 + 59;
-
-/** Bare hours mean PM: this app plans evenings, so "7" is 19:00, never 07:00. */
-function clock(hour: string, minute?: string, meridiem?: string): number {
+// How a bare hour is read depends on the occasion: "11" is 11am for brunch and
+// 11pm for drinks. Defaulting everything to PM is only right for dinner.
+function clock(hour: string, minute?: string, meridiem?: string, occasion: Occasion = "dinner"): number {
   let h = Number(hour);
   const m = minute ? Number(minute) : 0;
   if (meridiem === "pm" && h < 12) h += 12;
   else if (meridiem === "am" && h === 12) h = 0;
-  else if (!meridiem && h >= 1 && h <= 11) h += 12;
+  else if (!meridiem && h >= 1 && h <= 11 && !WINDOWS[occasion].amHours.includes(h)) h += 12;
   return h * 60 + m;
 }
 
@@ -28,14 +27,19 @@ const RANGE = /(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|to|until|till|til|thru|t
 const AFTER = /(?:after|from|starting|past|post)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/;
 const BEFORE = /(?:before|by|until|till|til)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/;
 
-export function resolveWindow(raw: string, day: Date = new Date()): Slot<TimeWindow> {
+export function resolveWindow(
+  raw: string,
+  day: Date = new Date(),
+  occasion: Occasion = "dinner",
+): Slot<TimeWindow> {
+  const { start: DAY_START, end: DAY_END } = WINDOWS[occasion];
   const text = normalise(raw);
   if (!text) return { raw, value: null, confidence: "low" };
 
   const range = text.match(RANGE);
   if (range?.[1] && range[4]) {
-    const start = clock(range[1], range[2], range[3]);
-    const end = clock(range[4], range[5], range[6]);
+    const start = clock(range[1], range[2], range[3], occasion);
+    const end = clock(range[4], range[5], range[6], occasion);
     if (end > start) {
       return { raw, value: { start: iso(day, start), end: iso(day, end) }, confidence: "high" };
     }
@@ -43,21 +47,21 @@ export function resolveWindow(raw: string, day: Date = new Date()): Slot<TimeWin
 
   const after = text.match(AFTER);
   if (after?.[1]) {
-    const start = clock(after[1], after[2], after[3]);
-    return { raw, value: { start: iso(day, start), end: iso(day, EVENING_END) }, confidence: "high" };
+    const start = clock(after[1], after[2], after[3], occasion);
+    return { raw, value: { start: iso(day, start), end: iso(day, DAY_END) }, confidence: "high" };
   }
 
   const before = text.match(BEFORE);
   if (before?.[1]) {
-    const end = clock(before[1], before[2], before[3]);
-    return { raw, value: { start: iso(day, EVENING_START), end: iso(day, end) }, confidence: "high" };
+    const end = clock(before[1], before[2], before[3], occasion);
+    return { raw, value: { start: iso(day, DAY_START), end: iso(day, end) }, confidence: "high" };
   }
 
   if (/after work|post work|evening|tonight/.test(text)) {
-    return { raw, value: { start: iso(day, 18 * 60), end: iso(day, EVENING_END) }, confidence: "low" };
+    return { raw, value: { start: iso(day, 18 * 60), end: iso(day, DAY_END) }, confidence: "low" };
   }
   if (/anytime|any time|whenever|free all|all night|im free|flexible|open/.test(text)) {
-    return { raw, value: { start: iso(day, EVENING_START), end: iso(day, EVENING_END) }, confidence: "low" };
+    return { raw, value: { start: iso(day, DAY_START), end: iso(day, DAY_END) }, confidence: "low" };
   }
   // A bare clock -- "7pm", "8ish", "around 7:30" (which normalise() turns into
   // "around 7 30"). Treated as "from then on", which is what someone answering
@@ -67,25 +71,26 @@ export function resolveWindow(raw: string, day: Date = new Date()): Slot<TimeWin
     const hour = Number(bare[1]);
     const minute = bare[2] ? Number(bare[2]) : 0;
     if (hour >= 1 && hour <= 23 && minute < 60) {
-      const start = clock(bare[1], bare[2], bare[3]);
-      if (start < EVENING_END) {
-        return { raw, value: { start: iso(day, start), end: iso(day, EVENING_END) }, confidence: "low" };
+      const start = clock(bare[1], bare[2], bare[3], occasion);
+      if (start < DAY_END) {
+        return { raw, value: { start: iso(day, start), end: iso(day, DAY_END) }, confidence: "low" };
       }
     }
   }
 
   if (/\bearly\b/.test(text)) {
-    return { raw, value: { start: iso(day, EVENING_START), end: iso(day, 20 * 60) }, confidence: "low" };
+    return { raw, value: { start: iso(day, DAY_START), end: iso(day, 20 * 60) }, confidence: "low" };
   }
   if (/\blate\b/.test(text)) {
-    return { raw, value: { start: iso(day, 20 * 60), end: iso(day, EVENING_END) }, confidence: "low" };
+    return { raw, value: { start: iso(day, 20 * 60), end: iso(day, DAY_END) }, confidence: "low" };
   }
 
   return { raw, value: null, confidence: "low" };
 }
 
-export function eveningWindow(day: Date = new Date()): TimeWindow {
-  return { start: iso(day, EVENING_START), end: iso(day, EVENING_END) };
+export function defaultWindow(day: Date = new Date(), occasion: Occasion = "dinner"): TimeWindow {
+  const { start, end } = WINDOWS[occasion];
+  return { start: iso(day, start), end: iso(day, end) };
 }
 
 function minutes(hhmm: string): number {

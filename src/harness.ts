@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { readFileSync } from "node:fs";
 import type { Candidate, Evaluation, MergedConstraints, PlanDoc } from "./contracts.ts";
-import { MERGED_KEYS } from "./contracts.ts";
+import { MERGED_KEYS, OCCASIONS } from "./contracts.ts";
 import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "./aggregator.ts";
 import { type RawSlots, resolveBudget, resolveDietary, resolveHome, resolveSlots } from "./resolve/index.ts";
 import { scoreCandidates } from "./agent/score.ts";
@@ -9,7 +9,9 @@ import { handleDM } from "./slots.ts";
 import { parseStatus, planStatus } from "./status.ts";
 import { extract, extractOffline } from "./agent/extract.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
-import { resolveWindow } from "./resolve/time.ts";
+import { defaultWindow, resolveWindow } from "./resolve/time.ts";
+import { resolveOccasion } from "./resolve/occasion.ts";
+import { nothingFits, whenLabel } from "./orchestrator/messages.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
@@ -325,6 +327,67 @@ async function main(): Promise<void> {
   check(
     "non-times are still not times",
     ["cheap", "vegetarian", "bushwick", "30 min"].every((t) => resolveWindow(t).value === null),
+  );
+
+  // The occasion. Everything used to assume dinner tonight: the 17:00 default,
+  // a bare hour meaning PM, the word "Tonight", and a dinner-only catalogue.
+  check(
+    "the occasion is read off the opening message",
+    resolveOccasion("sunday brunch?") === "brunch" &&
+      resolveOccasion("drinks friday") === "drinks" &&
+      resolveOccasion("coffee tmrw?") === "coffee" &&
+      resolveOccasion("lunch monday") === "lunch",
+  );
+  check("an opening message with no occasion is dinner", resolveOccasion("are we doing something friday") === "dinner");
+  check(
+    "a bare '11' is 11am for brunch and 11pm for drinks",
+    resolveWindow("11", new Date(), "brunch").value?.start.slice(11, 16) === "11:00" &&
+      resolveWindow("11", new Date(), "drinks").value?.start.slice(11, 16) === "23:00",
+  );
+  check(
+    "the default window follows the occasion",
+    defaultWindow(new Date(), "brunch").start.slice(11, 16) === "10:00" &&
+      defaultWindow(new Date(), "dinner").start.slice(11, 16) === "17:00",
+  );
+  const brunchMerged: MergedConstraints = {
+    budgetCapUSD: 200,
+    requiredDietary: [],
+    window: defaultWindow(new Date(), "brunch"),
+  };
+  const openProfiles = travelProfiles([{ userId: "anyone", slots: {} }]);
+  const atBrunch = filterVenues(VENUES, brunchMerged, openProfiles, "brunch");
+  const atDinner = filterVenues(VENUES, brunchMerged, openProfiles, "dinner");
+  check(
+    "a dinner-only venue is rejected at brunch, and on occasion not budget",
+    atBrunch.rejected.some((r) => r.failedOn === "occasion") &&
+      atBrunch.survivors.length < atDinner.survivors.length,
+    `(${atBrunch.survivors.length} brunch vs ${atDinner.survivors.length} dinner)`,
+  );
+  check(
+    "every occasion still has somewhere to go",
+    OCCASIONS.every((o) => filterVenues(VENUES, brunchMerged, openProfiles, o).survivors.length > 0),
+    OCCASIONS.map((o) => `${o}:${filterVenues(VENUES, brunchMerged, openProfiles, o).survivors.length}`).join(" "),
+  );
+  // A Sunday brunch card that says "Tonight" is the visible half of this bug.
+  check(
+    "tomorrow is spelt several ways",
+    ["tomorrow", "tmrw", "tmr"].every(
+      (w) => resolveDate(`coffee ${w}?`, new Date("2026-09-27T12:00:00"))?.getDate() === 28,
+    ),
+  );
+  check(
+    "a thin catalogue is not reported as somebody's budget",
+    /different kind of outing/i.test(nothingFits(["occasion"], "coffee")) &&
+      !/flex/i.test(nothingFits(["occasion"], "coffee")),
+  );
+  check(
+    "other failures still name a constraint to flex",
+    /flex/i.test(nothingFits(["budget"])) && /diet/i.test(nothingFits(["dietary"])),
+  );
+  check(
+    "the card names the occasion, not the time of day it isn't",
+    whenLabel("brunch", "2026-10-04") === "Sunday brunch" && whenLabel("dinner", "2026-10-02") === "Friday dinner",
+    whenLabel("brunch", "2026-10-04"),
   );
   check(
     "a bare number does not set a time when budget was asked",

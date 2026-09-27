@@ -1,5 +1,6 @@
 import type {
   Blackout,
+  Occasion,
   HandleDMInput,
   HandleDMResult,
   RequiredSlot,
@@ -13,7 +14,7 @@ import { type RawSlots, resolveSlots } from "./resolve/index.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
 import { resolveDietary } from "./resolve/dietary.ts";
 import { type Geocoder, resolveHome } from "./resolve/location.ts";
-import { clipWindow, eveningWindow } from "./resolve/time.ts";
+import { clipWindow, defaultWindow } from "./resolve/time.ts";
 import { BOROUGHS } from "./resolve/gazetteer.ts";
 import { classifyMeta, metaReply } from "./meta.ts";
 import { grokGeocoder } from "./resolve/geocode.ts";
@@ -106,14 +107,19 @@ function acknowledge(before: Slots, after: Slots): string {
 
 // What to assume when a slot cannot be read. Always low confidence, and always
 // announced, so the person can correct it.
-function assumeDefault(slots: Slots, slot: RequiredSlot, day: Date): { slots: Slots; note: string } {
+function assumeDefault(
+  slots: Slots,
+  slot: RequiredSlot,
+  day: Date,
+  occasion: Occasion,
+): { slots: Slots; note: string } {
   const next: Slots = { ...slots };
   switch (slot) {
     case "home":
       next.home = { raw: "(assumed)", value: { ...MANHATTAN, label: "Manhattan" }, confidence: "low" };
       return { slots: next, note: "I'll start you from Manhattan for now" };
     case "window":
-      next.window = { raw: "(assumed)", value: eveningWindow(day), confidence: "low" };
+      next.window = { raw: "(assumed)", value: defaultWindow(day, occasion), confidence: "low" };
       return { slots: next, note: "I'll assume you're free this evening" };
     case "maxTravelMin":
       next.maxTravelMin = { raw: "(assumed)", value: 45, confidence: "low" };
@@ -129,7 +135,11 @@ function assumeDefault(slots: Slots, slot: RequiredSlot, day: Date): { slots: Sl
 
 // Increments the ask count for whatever is next, rephrases on the second ask,
 // and assumes a default past MAX_ASKS so the conversation always advances.
-function advance(slots: Slots, day: Date): { slots: Slots; reply: string; complete?: true } {
+function advance(
+  slots: Slots,
+  day: Date,
+  occasion: Occasion,
+): { slots: Slots; reply: string; complete?: true } {
   let next = slots;
   const notes: string[] = [];
 
@@ -142,7 +152,7 @@ function advance(slots: Slots, day: Date): { slots: Slots; reply: string; comple
     next = { ...next, attempts: { ...(next.attempts ?? {}), [slot]: asks } };
 
     if (asks > MAX_ASKS) {
-      const assumed = assumeDefault(next, slot, day);
+      const assumed = assumeDefault(next, slot, day, occasion);
       next = assumed.slots;
       notes.push(assumed.note);
       continue;
@@ -307,6 +317,7 @@ export async function handleDM(
   // "after 7" on a Wednesday for a Friday plan means Friday at 7.
   const planDoc = await store.getPlan(input.planId);
   const day = dayOverride ?? (planDoc?.date ? new Date(`${planDoc.date}T12:00:00`) : new Date());
+  const occasion = planDoc?.occasion ?? "dinner";
 
   // History is read BEFORE storing this message, so extraction sees what came
   // before rather than the current turn twice.
@@ -361,7 +372,7 @@ export async function handleDM(
   // Reading it again as a plan answer let "none" (answering "any favourite
   // places?") resolve as a dietary answer and wipe the dietary profile.
   if (justOnboarded) {
-    const stepped = advance(seeded.slots, day);
+    const stepped = advance(seeded.slots, day, occasion);
     await store.setSlots(input.planId, input.userId, stepped.slots);
     const recallNow = seeded.used.length > 0 ? `Using ${seeded.used.join(" and ")} from your profile. ` : "";
     return reply(recallNow + stepped.reply, stepped.slots, missingSlots(stepped.slots));
@@ -371,11 +382,11 @@ export async function handleDM(
   const expecting = missingSlots(seeded.slots)[0];
 
   const raw = await extract(input.text, { history, expecting, geocode });
-  let resolved = await resolveSlots(raw, seeded.slots, geocode, day);
+  let resolved = await resolveSlots(raw, seeded.slots, geocode, day, occasion);
   resolved = applyBlackouts(resolved, user?.profile.blackouts, day);
 
   const heard = acknowledge(seeded.slots, resolved);
-  const stepped = advance(resolved, day);
+  const stepped = advance(resolved, day, occasion);
   resolved = stepped.slots;
 
   await store.setSlots(input.planId, input.userId, resolved);

@@ -1,5 +1,6 @@
 import { type Collection, MongoClient } from "mongodb";
 import type {
+  Occasion,
   PlanDoc,
   PlanStatus,
   RoundLog,
@@ -21,6 +22,7 @@ export type Store = {
   addParticipant(planId: string, userId: string): Promise<void>;
   setStatus(planId: string, status: PlanStatus): Promise<void>;
   setPlanDate(planId: string, date: string): Promise<void>;
+  setOccasion(planId: string, occasion: Occasion): Promise<void>;
   setShortlist(planId: string, venueIds: string[]): Promise<void>;
   // One vote per person; voting again replaces the previous choice.
   recordVote(planId: string, userId: string, venueId: string): Promise<void>;
@@ -114,6 +116,9 @@ function memoryStore(): Store {
     },
     async setPlanDate(planId, date) {
       ensure(planId).date = date;
+    },
+    async setOccasion(planId, occasion) {
+      ensure(planId).occasion = occasion;
     },
     async setShortlist(planId, venueIds) {
       ensure(planId).shortlist = [...venueIds];
@@ -282,6 +287,9 @@ async function mongoStore(uri: string): Promise<Store> {
     },
     async setPlanDate(planId, date) {
       await plans.updateOne({ _id: planId }, { $set: { date } });
+    },
+    async setOccasion(planId, occasion) {
+      await plans.updateOne({ _id: planId }, { $set: { occasion } });
     },
     async setShortlist(planId, venueIds) {
       await plans.updateOne({ _id: planId }, { $set: { shortlist: venueIds } });

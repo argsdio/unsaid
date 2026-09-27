@@ -11,9 +11,9 @@ import type {
 } from "./contracts.ts";
 import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "./aggregator.ts";
 import { scoreCandidates } from "./agent/score.ts";
-import type { SavedNegotiation } from "./contracts.ts";
+import type { Occasion, SavedNegotiation } from "./contracts.ts";
 import type { Store } from "./db.ts";
-import { VENUES, filterVenues, venueById } from "./venues.ts";
+import { VENUES, filterVenues, mealsFor, venueById } from "./venues.ts";
 
 // A venue is accepted when it clears this for a person. Set so a first round
 // rarely settles outright: the whole point is that somebody has to move.
@@ -78,6 +78,7 @@ function describe(objection: Objection | null): string {
   if (!objection) return "nothing obvious";
   if (objection.kind === "budget") return `budget, capped at $${objection.cap}`;
   if (objection.kind === "travel") return "how far people will travel";
+  if (objection.kind === "occasion") return `too few places for ${objection.occasion}`;
   return `a ${objection.tag} requirement`;
 }
 
@@ -123,16 +124,36 @@ function shuffle<T>(items: T[]): T[] {
 // entirely still leaves nothing, no amount of flexing will help and the real
 // blocker is the dietary set. Saying "the clash is budget" there sends people to
 // raise a number that was never the problem.
-function trueBlocker(agents: Agent[], day: Date, fallback: Objection | null): Objection | null {
+function trueBlocker(
+  agents: Agent[],
+  day: Date,
+  occasion: Occasion,
+  fallback: Objection | null,
+): Objection | null {
   const unlimited = agents.map((a) => flex(flex(a, "budgetCapUSD", 100000), "maxTravelMin", 100000));
-  if (survivorCount(unlimited, day) > 0) return fallback;
-  const tag = mergeConstraints(unlimited.map((a) => a.participant), day).requiredDietary[0];
-  return tag ? { kind: "dietary", tag } : fallback;
+  if (survivorCount(unlimited, day, occasion) > 0) return fallback;
+  // Nothing survives even with money and distance lifted, so the wall is one of
+  // the two constraints that never bend. Drop dietary too: if places appear, the
+  // dietary set was the wall; if they still do not, this occasion has nowhere to
+  // go and blaming a person's diet for a thin catalogue would be wrong.
+  const undieted = unlimited.map((a) => ({
+    ...a,
+    participant: { ...a.participant, slots: { ...a.participant.slots, dietary: undefined } },
+  }));
+  // No catalogue for this kind of outing at all: nobody's constraint is at fault
+  // and no amount of flexing helps, so say that instead of naming a person's diet.
+  if (!VENUES.some((v) => mealsFor(v).includes(occasion))) return { kind: "occasion", occasion };
+  if (survivorCount(undieted, day, occasion) > 0) {
+    const tag = mergeConstraints(unlimited.map((a) => a.participant), day, occasion).requiredDietary[0];
+    if (tag) return { kind: "dietary", tag };
+  }
+  return fallback;
 }
 
-function survivorCount(agents: Agent[], day: Date): number {
+function survivorCount(agents: Agent[], day: Date, occasion: Occasion): number {
   const parts = agents.map((a) => a.participant);
-  return filterVenues(VENUES, mergeConstraints(parts, day), travelProfiles(parts)).survivors.length;
+  return filterVenues(VENUES, mergeConstraints(parts, day, occasion), travelProfiles(parts), occasion)
+    .survivors.length;
 }
 
 // One step of relaxation applied to whoever holds the tightest cap, but only if
@@ -174,6 +195,7 @@ function relaxedBy(
 function bestRelaxation(
   agents: Agent[],
   day: Date,
+  occasion: Occasion,
   baseline: number,
 ): { agents: Agent[]; concessions: Concession[]; kind: "budget" | "travel"; gain: number } | null {
   let best: { agents: Agent[]; concessions: Concession[]; kind: "budget" | "travel"; gain: number } | null =
@@ -181,7 +203,7 @@ function bestRelaxation(
   for (const kind of ["budget", "travel"] as const) {
     const relaxed = relaxedBy(agents, kind);
     if (!relaxed) continue;
-    const gain = survivorCount(relaxed.agents, day) - baseline;
+    const gain = survivorCount(relaxed.agents, day, occasion) - baseline;
     if (!best || gain > best.gain) {
       best = { agents: relaxed.agents, concessions: relaxed.concessions, kind, gain };
     }
@@ -277,6 +299,7 @@ function acceptedByAll(survivors: Survivor[], positions: Position[][]): Survivor
 function whisperCandidate(
   agents: Agent[],
   day: Date,
+  occasion: Occasion,
   baseline: number,
   asked: string[],
 ): { userId: string; kind: "budget" | "travel"; newValue: number; question: string } | null {
@@ -297,7 +320,7 @@ function whisperCandidate(
       const relaxed = agents.map((a) =>
         a.userId === candidate.userId ? flex(a, slot, tightest + step) : a,
       );
-      if (survivorCount(relaxed, day) - baseline < 0) continue;
+      if (survivorCount(relaxed, day, occasion) - baseline < 0) continue;
       const newValue = tightest + step;
       const question =
         kind === "budget"
@@ -365,6 +388,7 @@ export async function negotiate(
   people: Participant[],
   day: Date = new Date(),
 ): Promise<NegotiationResult> {
+  const occasion = (await store.getPlan(planId))?.occasion ?? "dinner";
   const saved = await store.getNegotiation(planId);
   const relaxations: Relaxations = { ...(saved?.relaxations ?? {}) };
   const askedAlready = [...(saved?.asked ?? [])];
@@ -380,12 +404,12 @@ export async function negotiate(
 
   for (let round = saved?.round ?? 1; round <= MAX_ROUNDS; round++) {
     const parts = agents.map((a) => a.participant);
-    const merged = mergeConstraints(parts, day);
+    const merged = mergeConstraints(parts, day, occasion);
     if (!hasOverlap(merged.window)) {
       return done({ status: "failed", reason: "no-overlap", binding: null, merged, rounds });
     }
 
-    const filtered = filterVenues(VENUES, merged, travelProfiles(parts));
+    const filtered = filterVenues(VENUES, merged, travelProfiles(parts), occasion);
     const ranked = rankedObjections(filtered.rejected, merged);
     const objection = ranked[0] ?? null;
     lastObjection = objection;
@@ -408,7 +432,7 @@ export async function negotiate(
     }
 
     // Somebody willing? Take the relaxation that admits the most venues.
-    const relaxation = bestRelaxation(agents, day, filtered.survivors.length);
+    const relaxation = bestRelaxation(agents, day, occasion, filtered.survivors.length);
     if (relaxation) {
       agents = relaxation.agents;
       for (const a of agents) {
@@ -437,7 +461,7 @@ export async function negotiate(
 
     // Nobody willing. If the only person who could help hedged about it, ask them
     // privately rather than either pushing them silently or giving up.
-    const whisper = whisperCandidate(agents, day, filtered.survivors.length, askedAlready);
+    const whisper = whisperCandidate(agents, day, occasion, filtered.survivors.length, askedAlready);
     if (whisper) {
       rounds.push(
         toRoundLog(
@@ -476,15 +500,15 @@ export async function negotiate(
     return done({
         status: "failed",
         reason: "deadlock",
-        binding: trueBlocker(agents, day, objection),
+        binding: trueBlocker(agents, day, occasion, objection),
         merged,
         rounds,
       });
   }
 
   const parts = agents.map((a) => a.participant);
-  const finalMerged = mergeConstraints(parts, day);
-  const filtered = filterVenues(VENUES, finalMerged, travelProfiles(parts));
+  const finalMerged = mergeConstraints(parts, day, occasion);
+  const filtered = filterVenues(VENUES, finalMerged, travelProfiles(parts), occasion);
   if (filtered.survivors.length > 0) {
     const positions = await positionsFor(agents, filtered.survivors);
     const shortlist = rank(filtered.survivors, positions, SHORTLIST);
@@ -493,7 +517,7 @@ export async function negotiate(
   return done({
     status: "failed",
     reason: "round-cap",
-    binding: trueBlocker(agents, day, lastObjection),
+    binding: trueBlocker(agents, day, occasion, lastObjection),
     merged: finalMerged,
     rounds,
   });

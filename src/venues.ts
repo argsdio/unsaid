@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import type {
   FilterResult,
+  Occasion,
   MergedConstraints,
   Rejection,
   Survivor,
@@ -12,6 +13,26 @@ import { travelMin } from "./travel.ts";
 export const VENUES: Venue[] = JSON.parse(
   readFileSync(new URL("./venues.json", import.meta.url), "utf8"),
 ) as Venue[];
+
+// Inferred from the hand-written tags, because editing fifty entries by hand to
+// add one field is a worse use of the time than a documented guess. A catalogue
+// built from Google Places would set `meals` from real `types` and this would
+// only be the fallback.
+const MEAL_TAGS: Array<[Occasion, string[]]> = [
+  ["brunch", ["brunch", "breakfast", "bagels", "diner", "cafe"]],
+  ["coffee", ["cafe", "bagels", "coffee"]],
+  ["lunch", ["quick", "pizza", "noodles", "tacos", "falafel", "dumplings", "bagels", "diner", "cafe", "sandwiches"]],
+  ["drinks", ["cocktails", "wine", "rooftop", "bar", "brewery"]],
+];
+
+export function mealsFor(venue: Venue): Occasion[] {
+  if (venue.meals?.length) return venue.meals;
+  const found = new Set<Occasion>(["dinner"]); // almost everything serves dinner
+  for (const [occasion, tags] of MEAL_TAGS) {
+    if (venue.tags.some((t) => tags.includes(t))) found.add(occasion);
+  }
+  return [...found];
+}
 
 const BY_ID = new Map(VENUES.map((v) => [v.id, v]));
 
@@ -25,11 +46,19 @@ export function filterVenues(
   venues: Venue[],
   merged: MergedConstraints,
   people: TravelProfile[],
+  occasion: Occasion = "dinner",
 ): FilterResult {
   const survivors: Survivor[] = [];
   const rejected: Rejection[] = [];
 
   for (const venue of venues) {
+    // Checked first: a BBQ joint is not a brunch option at any price, so
+    // attributing it to budget would send people to flex the wrong thing.
+    if (!mealsFor(venue).includes(occasion)) {
+      rejected.push({ venueId: venue.id, failedOn: "occasion" });
+      continue;
+    }
+
     if (venue.estCostUSD > merged.budgetCapUSD) {
       rejected.push({ venueId: venue.id, failedOn: "budget" });
       continue;

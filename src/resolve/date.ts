@@ -36,7 +36,8 @@ export function resolveDate(text: string, today: Date = new Date()): Date | null
   if (!t) return null;
 
   if (/\b(tonight|today)\b/.test(t)) return atMidnight(today);
-  if (/\btomorrow\b/.test(t)) return plusDays(today, 1);
+  // People type "tmrw" as often as they type the whole word.
+  if (/\b(tomorrow|tmrw|tmr|tmw|2moro)\b/.test(t)) return plusDays(today, 1);
 
   const wantsNext = /\bnext\b/.test(t);
 

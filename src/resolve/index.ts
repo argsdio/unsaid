@@ -1,4 +1,4 @@
-import type { Slots } from "../contracts.ts";
+import type { Occasion, Slots } from "../contracts.ts";
 import { resolveDietary } from "./dietary.ts";
 import { resolveTravelMin } from "./duration.ts";
 import { type Geocoder, resolveHome } from "./location.ts";
@@ -33,6 +33,7 @@ export async function resolveSlots(
   existing: Slots = {},
   geocode?: Geocoder,
   day: Date = new Date(),
+  occasion: Occasion = "dinner",
 ): Promise<Slots> {
   const next: Slots = { ...existing };
 
@@ -48,7 +49,7 @@ export async function resolveSlots(
   }
 
   if (raw.windowRaw?.trim()) {
-    const slot = resolveWindow(raw.windowRaw, day);
+    const slot = resolveWindow(raw.windowRaw, day, occasion);
     if (slot.value !== null || next.window === undefined) next.window = slot;
   }
 

@@ -1,9 +1,9 @@
-import type { RequiredSlot } from "./contracts.ts";
+import type { Occasion, RequiredSlot } from "./contracts.ts";
 import { hasOverlap, mergeConstraints } from "./aggregator.ts";
 import { travelProfiles } from "./aggregator.ts";
 import type { Store } from "./db.ts";
 import { missingSlots } from "./slots.ts";
-import { VENUES, filterVenues, venueById } from "./venues.ts";
+import { VENUES, filterVenues, mealsFor, venueById } from "./venues.ts";
 
 export function parseStatus(text: string): boolean {
   return /^\s*(@unsaid\s+)?(status|where are we|whats going on|what's going on|who's left|whos left|debug)\s*\??\s*$/i.test(
@@ -62,7 +62,10 @@ export async function planStatus(
   if (!plan) return `I can't find that plan any more.\n\nYour profile: ${own}`;
 
   const slots = await store.getAllSlots(planId);
-  const lines: string[] = [`Plan ${plan.joinCode} · ${plan.status} · ${plan.participants.length} joined`];
+  const what = plan.occasion ?? "dinner";
+  const lines: string[] = [
+    `Plan ${plan.joinCode} · ${what}${plan.date ? ` ${plan.date}` : ""} · ${plan.status} · ${plan.participants.length} joined`,
+  ];
 
   const people = plan.participants.map((id) => ({ userId: id, slots: slots[id] ?? {} }));
   const roster = people.map((p) => {
@@ -76,7 +79,11 @@ export async function planStatus(
 
   const answered = people.filter((p) => missingSlots(p.slots).length === 0);
   if (answered.length > 0) {
-    const merged = mergeConstraints(answered);
+    // The occasion and day are the plan's, not today's dinner: a brunch plan that
+    // reports how many dinner places fit is answering a question nobody asked.
+    const occasion: Occasion = plan.occasion ?? "dinner";
+    const day = plan.date ? new Date(`${plan.date}T12:00:00`) : new Date();
+    const merged = mergeConstraints(answered, day, occasion);
     const diet = merged.requiredDietary.length ? merged.requiredDietary.join(", ") : "anything";
     const when = hasOverlap(merged.window)
       ? `${clock(merged.window.start)}–${clock(merged.window.end)}`
@@ -87,10 +94,11 @@ export async function planStatus(
       answered.length === people.length ? "Group" : `Group so far (${answered.length} of ${people.length} answered)`;
     lines.push("", `${scope}: under $${merged.budgetCapUSD} · ${diet} · ${when}`);
 
-    const { survivors } = filterVenues(VENUES, merged, travelProfiles(answered));
+    const { survivors } = filterVenues(VENUES, merged, travelProfiles(answered), occasion);
+    const forOccasion = VENUES.filter((v) => mealsFor(v).includes(occasion)).length;
     lines.push(
       survivors.length > 0
-        ? `${survivors.length} of ${VENUES.length} places still fit${
+        ? `${survivors.length} of ${forOccasion} ${occasion} places still fit${
             survivors[0] ? ` (e.g. ${venueById(survivors[0].venueId)?.name})` : ""
           }`
         : `Nothing fits yet — someone would need to flex`,

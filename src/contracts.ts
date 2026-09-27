@@ -15,6 +15,13 @@ export type Slot<T> = {
   confidence: Confidence;
 };
 
+// What kind of outing this is. Everything about the app used to assume "dinner
+// tonight": the 17:00 default window, a bare "7" meaning 7pm, the word
+// "Tonight" on the card, and a catalogue of dinner venues. This is that
+// assumption made explicit so it can be something else.
+export const OCCASIONS = ["brunch", "lunch", "dinner", "drinks", "coffee"] as const;
+export type Occasion = (typeof OCCASIONS)[number];
+
 export type Coords = { lat: number; lng: number };
 export type Home = Coords & { label: string };
 export type TimeWindow = { start: string; end: string };
@@ -89,13 +96,17 @@ export type Venue = {
   neighborhood: string;
   lat: number;
   lng: number;
+  // Which occasions this venue is plausible for. Optional because the current
+  // catalogue is hand-written and infers them from tags; a Places-sourced
+  // catalogue would set them from real `types`.
+  meals?: Occasion[];
 };
 
 // One aggregate per survivor, so whose commute it is stays unlabelled.
 export type Survivor = { venueId: string; longestTravelMin: number };
 
 // A category, never a person and never a reason -- safe for the backroom screen.
-export type FailedOn = "budget" | "dietary" | "travel";
+export type FailedOn = "budget" | "dietary" | "travel" | "occasion";
 export type Rejection = { venueId: string; failedOn: FailedOn };
 
 export type FilterResult = { survivors: Survivor[]; rejected: Rejection[] };
@@ -121,7 +132,11 @@ export const MERGED_KEYS = ["budgetCapUSD", "requiredDietary", "window"] as cons
 export type Objection =
   | { kind: "budget"; cap: number }
   | { kind: "dietary"; tag: DietaryTag }
-  | { kind: "travel"; maxMin: number };
+  | { kind: "travel"; maxMin: number }
+  // Not a person's objection at all: the catalogue has too few places for this
+  // kind of outing. Named so the failure message stops blaming whoever has the
+  // tightest budget for the fact that we know two coffee shops.
+  | { kind: "occasion"; occasion: Occasion };
 
 // Dietary is absent on purpose. A dietary need is not a preference and is never
 // asked to bend.
@@ -224,6 +239,9 @@ export type PlanDoc = {
   slots: Record<string, Slots>; // B
   merged?: MergedConstraints; // B
   chosen?: Candidate; // A
+  // What kind of outing: brunch, dinner, drinks. Drives which venues qualify,
+  // what a bare "11" means, the default window, and the copy.
+  occasion?: Occasion;
   // The day the plan is for, as YYYY-MM-DD. Read from the creator's first
   // message ("dinner friday?"). Without it every plan is silently today, so
   // times and blackouts resolve against the wrong day.

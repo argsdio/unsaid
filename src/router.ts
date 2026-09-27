@@ -7,6 +7,7 @@ import { type NegotiateOutcome, resumeAfterWhisper, runNegotiation } from "./orc
 import { parseVote, tallyVotes } from "./voting.ts";
 import { classifyMeta } from "./meta.ts";
 import { resolveDate } from "./resolve/date.ts";
+import { resolveOccasion } from "./resolve/occasion.ts";
 import { venueById } from "./venues.ts";
 import { everyoneIn, waitingOnOthers } from "./orchestrator/messages.ts";
 import {
@@ -279,6 +280,12 @@ export async function onDirectText(
 
   if (!current) {
     const plan = await createPlan(store, userId, tracked);
+
+    // "sunday brunch" is both a day and a kind of outing. The occasion decides
+    // which venues qualify, what a bare "11" means, and the wording of the card.
+    const occasion = resolveOccasion(text);
+    await store.setOccasion(plan._id, occasion);
+    botLog("plan occasion", { planId: plan._id, from: text, occasion });
 
     // "dinner friday?" means Friday. Without this every plan is silently today.
     const when = resolveDate(text);

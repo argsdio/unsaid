@@ -4,7 +4,7 @@ import type { Store } from "../db.ts";
 import { negotiate, resumeNegotiation } from "../negotiation.ts";
 import { venueById } from "../venues.ts";
 import { botLog, slotSnapshot } from "../log.ts";
-import { nothingFits, pickTime, planCard } from "./messages.ts";
+import { nothingFits, pickTime, planCard, whenLabel } from "./messages.ts";
 
 export type NegotiateOutcome =
   // A shortlist of up to three. `poll` is the same options as a Spectrum poll
@@ -74,14 +74,9 @@ async function toOutcome(
     }
     // `binding` is already the single largest constraint by counterfactual
     // measure, so this names one thing to flex instead of listing every category.
-    const area =
-      result.binding?.kind === "travel"
-        ? "travel"
-        : result.binding?.kind === "dietary"
-          ? "dietary"
-          : "budget";
+    const area = result.binding && result.binding.kind !== "budget" ? result.binding.kind : "budget";
     botLog("go: fail", { reason: result.reason, binding: result.binding });
-    return { ok: false, text: nothingFits([area]) };
+    return { ok: false, text: nothingFits([area], plan.occasion) };
   }
 
   const venues = result.shortlist.flatMap((id) => {
@@ -100,12 +95,13 @@ async function toOutcome(
     return {
       ok: true,
       shortlist: result.shortlist,
-      text: planCard(top, { venueId: top.id, time, estCostUSD: top.estCostUSD }),
+      text: planCard(top, { venueId: top.id, time, estCostUSD: top.estCostUSD }, plan.occasion, plan.date),
     };
   }
 
   // pickTime already returns a formatted clock ("7:00 PM"), not an ISO string.
   // Slicing it produced an empty string and the message read "tonight at :".
+  const when = whenLabel(plan.occasion, plan.date);
   const lines = venues.map((v, i) => `${i + 1}. ${v.name} (${v.neighborhood}) · about $${v.estCostUSD}`);
   const choices = venues.map((_, i) => i + 1);
   const replyHint =
@@ -116,11 +112,11 @@ async function toOutcome(
     ok: true,
     shortlist: result.shortlist,
     poll: {
-      title: `Tonight at ${time} — which one?`,
+      title: `${when} at ${time} — which one?`,
       // Price in the label so the native poll carries the same information as
       // the text list. parseVote still matches these by name.
       options: venues.map((v) => `${v.name} · $${v.estCostUSD}`),
     },
-    text: [`These all work for everyone, tonight at ${time}:`, "", ...lines, "", replyHint].join("\n"),
+    text: [`These all work for everyone, ${when.toLowerCase()} at ${time}:`, "", ...lines, "", replyHint].join("\n"),
   };
 }
