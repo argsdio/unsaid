@@ -59,6 +59,21 @@ export function resolveWindow(raw: string, day: Date = new Date()): Slot<TimeWin
   if (/anytime|any time|whenever|free all|all night|im free|flexible|open/.test(text)) {
     return { raw, value: { start: iso(day, EVENING_START), end: iso(day, EVENING_END) }, confidence: "low" };
   }
+  // A bare clock -- "7pm", "8ish", "around 7:30" (which normalise() turns into
+  // "around 7 30"). Treated as "from then on", which is what someone answering
+  // "what time works?" with a single time means.
+  const bare = text.match(/\b(\d{1,2})(?:\s+(\d{2}))?\s*(am|pm)?(?:\s*ish)?\b/);
+  if (bare?.[1]) {
+    const hour = Number(bare[1]);
+    const minute = bare[2] ? Number(bare[2]) : 0;
+    if (hour >= 1 && hour <= 23 && minute < 60) {
+      const start = clock(bare[1], bare[2], bare[3]);
+      if (start < EVENING_END) {
+        return { raw, value: { start: iso(day, start), end: iso(day, EVENING_END) }, confidence: "low" };
+      }
+    }
+  }
+
   if (/\bearly\b/.test(text)) {
     return { raw, value: { start: iso(day, EVENING_START), end: iso(day, 20 * 60) }, confidence: "low" };
   }

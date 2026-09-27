@@ -9,6 +9,7 @@ import { handleDM } from "./slots.ts";
 import { parseStatus, planStatus } from "./status.ts";
 import { extract, extractOffline } from "./agent/extract.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
+import { resolveWindow } from "./resolve/time.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
@@ -309,6 +310,55 @@ async function main(): Promise<void> {
   check("two blackouts parsed from one sentence", tuesday.length === 2, `(${tuesday.length})`);
   usedPlans.push(P("a"), P("b"));
   usedUsers.push(U("maya"));
+
+  // The repeated-question bug: four defects that together made two slots loop
+  // forever. Each gets its own assertion.
+  check(
+    "a bare clock resolves as a time",
+    ["7pm", "8ish", "around 7:30", "7", "at 8"].every((t) => resolveWindow(t).value !== null),
+  );
+  check(
+    "non-times are still not times",
+    ["cheap", "vegetarian", "bushwick", "30 min"].every((t) => resolveWindow(t).value === null),
+  );
+  check(
+    "a bare number does not set a time when budget was asked",
+    extractOffline("8", "budgetCapUSD").windowRaw === undefined &&
+      extractOffline("8", "budgetCapUSD").budgetRaw === "8",
+  );
+  check(
+    "answering the home question always attempts home",
+    (await extract("60th and lex", { expecting: "home" })).homeRaw === "60th and lex",
+  );
+
+  // The escalation ladder: never the same string twice, and never a dead end.
+  const ladderStore = await openStore({ memory: true });
+  await ladderStore.upsertUser({
+    _id: "ladder", phone: "ladder", profile: { tastes: [], preferredSpots: [] },
+    onboardedAt: "now", askedProfile: [], wishlist: [],
+  });
+  const ask = async (text: string) =>
+    (await handleDM({ planId: "lp", userId: "ladder", text }, ladderStore)).reply;
+  const ask1 = await ask("dinner friday?");
+  const ask2 = await ask("qqqq zzzz");
+  const ask3 = await ask("qqqq zzzz");
+  check("the second ask is rephrased, not repeated", ask1 !== ask2 && ask2.includes("didn't catch"));
+  check("the third ask stops asking and assumes a default", ask3.includes("Manhattan"));
+  const laddered = await ladderStore.getSlots("lp", "ladder");
+  check("the assumed value is marked low confidence", laddered.home?.confidence === "low");
+  check("attempts are tracked per slot", (laddered.attempts?.home ?? 0) >= 3);
+
+  // Acknowledgement, which makes a misread visible in the next turn.
+  const ackStore = await openStore({ memory: true });
+  await ackStore.upsertUser({
+    _id: "ack", phone: "ack", profile: { tastes: [], preferredSpots: [] },
+    onboardedAt: "now", askedProfile: [], wishlist: [],
+  });
+  await handleDM({ planId: "ap", userId: "ack", text: "dinner friday?" }, ackStore);
+  const acked = await handleDM({ planId: "ap", userId: "ack", text: "bushwick" }, ackStore);
+  check("the reply echoes what it understood", acked.reply.startsWith("Bushwick"), acked.reply.slice(0, 40));
+  await ladderStore.close();
+  await ackStore.close();
 
   // A budget must not be read out of a time or a duration. "after 7" gave 7,
   // which tripped the $8 floor and silently returned null, so a message naming

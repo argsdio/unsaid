@@ -12,9 +12,13 @@ import type { Store } from "./db.ts";
 import { type RawSlots, resolveSlots } from "./resolve/index.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
 import { resolveDietary } from "./resolve/dietary.ts";
-import { resolveHome } from "./resolve/location.ts";
-import { clipWindow } from "./resolve/time.ts";
+import { type Geocoder, resolveHome } from "./resolve/location.ts";
+import { clipWindow, eveningWindow } from "./resolve/time.ts";
+import { BOROUGHS } from "./resolve/gazetteer.ts";
+import { grokGeocoder } from "./resolve/geocode.ts";
 import { findVenueByName } from "./venues.ts";
+
+const MANHATTAN = BOROUGHS.manhattan ?? { lat: 40.7831, lng: -73.9712 };
 
 // Money is asked LAST. The whole product exists because budget is the thing
 // nobody wants to say out loud, so leading with it is the worst possible opener.
@@ -37,6 +41,20 @@ const QUESTIONS: Record<RequiredSlot, string> = {
   budgetCapUSD: "Last thing — roughly what are you thinking budget-wise? \"cheap\" works too.",
 };
 
+// Asked once, then rephrased with concrete examples. Never the same string twice:
+// a question that repeats verbatim is the worst failure a chat interface has.
+const RETRY: Record<RequiredSlot, string> = {
+  home: "Sorry, I didn't catch that. A neighborhood, cross-street or address all work — \"Bushwick\", \"60th and Lex\", \"133 W 3rd St\".",
+  window: "Let me try again — what time? Something like \"7pm\", \"after 8\", or \"6 to 10\".",
+  maxTravelMin: "In minutes is easiest — \"30 min\", \"an hour\", or \"not far\".",
+  dietary: "Anything you avoid? \"vegetarian\", \"no nuts\", or \"I eat everything\" all work.",
+  budgetCapUSD: "A rough number per person — \"$30\", \"20 to 40\", or just \"cheap\".",
+};
+
+// After this many asks, assume something and move on. A slot we cannot read must
+// degrade to a low-confidence default, never block the plan.
+const MAX_ASKS = 2;
+
 const DONE = "Got everything I need. Working it out with the others now.";
 
 // Asked once, then reused across every future plan. Budget and availability are
@@ -51,6 +69,86 @@ const PROFILE_QUESTIONS: Record<ProfileField, string> = {
   blackouts: "Any times that never work for you? Like \"class on Tuesday nights\", or just \"none\".",
   preferredSpots: "Last one — any favourite places I should keep in mind?",
 };
+
+function hhmm(iso: string): string {
+  const [h, m] = iso.slice(11, 16).split(":").map(Number);
+  const hour = ((h ?? 0) % 12) || 12;
+  return `${hour}${m ? `:${String(m).padStart(2, "0")}` : ""}${(h ?? 0) < 12 ? "am" : "pm"}`;
+}
+
+// Echo back what this message filled. Cheap, and it makes a misread visible in
+// the very next turn instead of at `go` -- a budget silently set to $30 by a
+// mangled time would have been caught here immediately.
+function acknowledge(before: Slots, after: Slots): string {
+  const got: string[] = [];
+  if (!before.home?.value && after.home?.value) got.push(after.home.value.label);
+  if (!before.window?.value && after.window?.value) {
+    got.push(`${hhmm(after.window.value.start)}\u2013${hhmm(after.window.value.end)}`);
+  }
+  if (before.maxTravelMin?.value == null && after.maxTravelMin?.value != null) {
+    got.push(`up to ${after.maxTravelMin.value} min`);
+  }
+  if (!before.dietary?.value && after.dietary?.value) {
+    got.push(after.dietary.value.length ? after.dietary.value.join(", ") : "no food limits");
+  }
+  if (before.budgetCapUSD?.value == null && after.budgetCapUSD?.value != null) {
+    got.push(`$${after.budgetCapUSD.value}`);
+  }
+  return got.length ? `${got.join(", ")} \u2014 got it. ` : "";
+}
+
+// What to assume when a slot cannot be read. Always low confidence, and always
+// announced, so the person can correct it.
+function assumeDefault(slots: Slots, slot: RequiredSlot, day: Date): { slots: Slots; note: string } {
+  const next: Slots = { ...slots };
+  switch (slot) {
+    case "home":
+      next.home = { raw: "(assumed)", value: { ...MANHATTAN, label: "Manhattan" }, confidence: "low" };
+      return { slots: next, note: "I'll start you from Manhattan for now" };
+    case "window":
+      next.window = { raw: "(assumed)", value: eveningWindow(day), confidence: "low" };
+      return { slots: next, note: "I'll assume you're free this evening" };
+    case "maxTravelMin":
+      next.maxTravelMin = { raw: "(assumed)", value: 45, confidence: "low" };
+      return { slots: next, note: "I'll assume up to 45 minutes of travel" };
+    case "dietary":
+      next.dietary = { raw: "(assumed)", value: [], confidence: "low" };
+      return { slots: next, note: "I'll assume no food restrictions" };
+    case "budgetCapUSD":
+      next.budgetCapUSD = { raw: "(assumed)", value: 35, confidence: "low" };
+      return { slots: next, note: "I'll assume around $35" };
+  }
+}
+
+// Increments the ask count for whatever is next, rephrases on the second ask,
+// and assumes a default past MAX_ASKS so the conversation always advances.
+function advance(slots: Slots, day: Date): { slots: Slots; reply: string } {
+  let next = slots;
+  const notes: string[] = [];
+
+  for (let guard = 0; guard < REQUIRED_SLOTS.length + 1; guard++) {
+    const missing = missingSlots(next);
+    const slot = missing[0];
+    if (!slot) break;
+
+    const asks = (next.attempts?.[slot] ?? 0) + 1;
+    next = { ...next, attempts: { ...(next.attempts ?? {}), [slot]: asks } };
+
+    if (asks > MAX_ASKS) {
+      const assumed = assumeDefault(next, slot, day);
+      next = assumed.slots;
+      notes.push(assumed.note);
+      continue;
+    }
+
+    const question = asks >= 2 ? RETRY[slot] : QUESTIONS[slot];
+    const prefix = notes.length ? `${notes.join(", and ")} \u2014 say so any time if that's wrong. ` : "";
+    return { slots: next, reply: prefix + question };
+  }
+
+  const prefix = notes.length ? `${notes.join(", and ")}. ` : "";
+  return { slots: next, reply: prefix + DONE };
+}
 
 export function missingSlots(slots: Slots): RequiredSlot[] {
   return ASK_ORDER.filter((key) => {
@@ -113,6 +211,7 @@ async function advanceOnboarding(
   userId: string,
   raw: RawSlots,
   text: string,
+  geocode?: Geocoder,
 ): Promise<{ user: UserDoc; done: boolean }> {
   const user: UserDoc = existing
     ? { ...existing, profile: { ...existing.profile }, askedProfile: [...(existing.askedProfile ?? [])] }
@@ -123,7 +222,7 @@ async function advanceOnboarding(
   const answering = asked[asked.length - 1] as ProfileField | undefined;
 
   if (answering === "home") {
-    const home = await resolveHome(raw.homeRaw ?? text);
+    const home = await resolveHome(raw.homeRaw ?? text, geocode);
     if (home.value) user.profile.home = home.value;
   } else if (answering === "dietary") {
     const { slot } = resolveDietary(raw.dietaryRaw ?? text);
@@ -195,6 +294,7 @@ export async function handleDM(
   day: Date = new Date(),
 ): Promise<HandleDMResult> {
   const now = new Date().toISOString();
+  const geocode = grokGeocoder();
 
   // History is read BEFORE storing this message, so extraction sees what came
   // before rather than the current turn twice.
@@ -217,9 +317,10 @@ export async function handleDM(
   if (!stored?.onboardedAt) {
     const rawProfile = await extract(input.text, {
       history,
+      geocode,
       expecting: (stored?.askedProfile ?? []).slice(-1)[0] as "blackouts" | undefined,
     });
-    const { user, done } = await advanceOnboarding(stored, input.userId, rawProfile, input.text);
+    const { user, done } = await advanceOnboarding(stored, input.userId, rawProfile, input.text, geocode);
     await store.upsertUser(user);
     if (!done) {
       const field = (user.askedProfile ?? []).slice(-1)[0] as ProfileField;
@@ -235,24 +336,26 @@ export async function handleDM(
   // Reading it again as a plan answer let "none" (answering "any favourite
   // places?") resolve as a dietary answer and wipe the dietary profile.
   if (justOnboarded) {
-    await store.setSlots(input.planId, input.userId, seeded.slots);
-    const missingNow = missingSlots(seeded.slots);
+    const stepped = advance(seeded.slots, day);
+    await store.setSlots(input.planId, input.userId, stepped.slots);
     const recallNow = seeded.used.length > 0 ? `Using ${seeded.used.join(" and ")} from your profile. ` : "";
-    return reply(recallNow + nextQuestion(missingNow), seeded.slots, missingNow);
+    return reply(recallNow + stepped.reply, stepped.slots, missingSlots(stepped.slots));
   }
 
   // What we asked last, so a bare "30" lands on the slot in question.
   const expecting = missingSlots(seeded.slots)[0];
 
-  const raw = await extract(input.text, { history, expecting });
-  let resolved = await resolveSlots(raw, seeded.slots, undefined, day);
+  const raw = await extract(input.text, { history, expecting, geocode });
+  let resolved = await resolveSlots(raw, seeded.slots, geocode, day);
   resolved = applyBlackouts(resolved, user?.profile.blackouts, day);
+
+  const heard = acknowledge(seeded.slots, resolved);
+  const stepped = advance(resolved, day);
+  resolved = stepped.slots;
 
   await store.setSlots(input.planId, input.userId, resolved);
   if (user) await writeBackProfile(store, user, resolved);
 
-  const missing = missingSlots(resolved);
-  const question = nextQuestion(missing);
   const recall = seeded.used.length > 0 ? `Using ${seeded.used.join(" and ")} from your profile. ` : "";
-  return reply(recall + question, resolved, missing);
+  return reply(recall + heard + stepped.reply, resolved, missingSlots(resolved));
 }

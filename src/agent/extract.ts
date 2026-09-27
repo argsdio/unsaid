@@ -4,11 +4,12 @@ import type { RawSlots } from "../resolve/index.ts";
 import { resolveBudget, resolveTravelMin, resolveWindow } from "../resolve/index.ts";
 import { resolveBlackouts } from "../resolve/blackout.ts";
 import { resolveDietary } from "../resolve/dietary.ts";
-import { resolveHome } from "../resolve/location.ts";
+import { type Geocoder, resolveHome } from "../resolve/location.ts";
 
 export type ExtractContext = {
   history?: StoredMessage[];
   expecting?: RequiredSlot | "blackouts";
+  geocode?: Geocoder;
 };
 
 const SCHEMA = {
@@ -84,7 +85,9 @@ const RAW_FIELD: Record<NonNullable<ExtractContext["expecting"]>, keyof RawSlots
   blackouts: "blackoutRaw",
 };
 
-const GREEDY_FIELDS = new Set<string>(["budgetRaw", "travelRaw"]);
+// Resolvers that will claim a bare number. windowRaw joined them once a bare
+// clock became valid, so "8" answering the budget question no longer sets 8pm.
+const GREEDY_FIELDS = new Set<string>(["budgetRaw", "travelRaw", "windowRaw"]);
 
 const STRING_FIELDS = [
   "budgetRaw",
@@ -132,15 +135,26 @@ function mergeExtractions(primary: RawSlots, fallback: RawSlots): RawSlots {
 async function offlineExtraction(
   text: string,
   expecting: ExtractContext["expecting"],
+  geocode?: Geocoder,
 ): Promise<RawSlots> {
   const raw = extractOffline(text, expecting);
-  if (!raw.homeRaw && (await resolveHome(text)).value !== null) raw.homeRaw = text;
+  if (raw.homeRaw) return raw;
+
+  // Previously homeRaw was set only when resolveHome had ALREADY succeeded, so a
+  // gazetteer miss meant resolveSlots never even attempted the slot. If we asked
+  // about home, the answer is a home attempt regardless of whether we can read
+  // it yet -- the resolver and then the retry ladder decide what happens next.
+  if (expecting === "home") {
+    raw.homeRaw = text;
+  } else if ((await resolveHome(text, geocode)).value !== null) {
+    raw.homeRaw = text;
+  }
   return raw;
 }
 
 export async function extract(text: string, ctx: ExtractContext = {}): Promise<RawSlots> {
   const client = grok();
-  const offline = await offlineExtraction(text, ctx.expecting);
+  const offline = await offlineExtraction(text, ctx.expecting, ctx.geocode);
   if (!client) return offline;
 
   try {

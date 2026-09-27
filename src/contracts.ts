@@ -56,6 +56,9 @@ export type Slots = {
   // Phrases no resolver could canonicalise. Scored softly, never filtered on --
   // this is what stops "I only eat purple food" emptying the survivor set.
   unresolved?: string[];
+  // How many times each slot has been asked. Drives the retry ladder: ask,
+  // rephrase with an example, then assume a default rather than loop forever.
+  attempts?: Partial<Record<RequiredSlot, number>>;
 };
 
 export const REQUIRED_SLOTS = [
