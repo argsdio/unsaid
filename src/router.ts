@@ -19,6 +19,7 @@ import {
   spacesFor,
 } from "./plan.ts";
 import { handleDM, missingSlots } from "./slots.ts";
+import { planStatus, parseStatus } from "./status.ts";
 import { botLog, slotSnapshot } from "./log.ts";
 
 function spaceKind(space: unknown): "dm" | "group" | "unknown" {
@@ -170,6 +171,11 @@ export async function onDirectText(
   if (favorite) {
     if (current) rememberSpace(current._id, userId, tracked);
     await send(space, await saveFavorite(store, userId, favorite), "favorite: saved without slot-fill");
+    return;
+  }
+
+  if (parseStatus(text)) {
+    await send(space, await planStatus(store, current?._id, userId), "status");
     return;
   }
 

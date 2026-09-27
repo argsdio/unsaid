@@ -6,6 +6,7 @@ import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "
 import { type RawSlots, resolveBudget, resolveDietary, resolveHome, resolveSlots } from "./resolve/index.ts";
 import { scoreCandidates } from "./agent/score.ts";
 import { handleDM } from "./slots.ts";
+import { parseStatus, planStatus } from "./status.ts";
 import { extract, extractOffline } from "./agent/extract.ts";
 import { resolveBlackouts } from "./resolve/blackout.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
@@ -308,6 +309,38 @@ async function main(): Promise<void> {
   check("two blackouts parsed from one sentence", tuesday.length === 2, `(${tuesday.length})`);
   usedPlans.push(P("a"), P("b"));
   usedUsers.push(U("maya"));
+
+  // The status command: the thing that makes every other bug debuggable.
+  const stStore = await openStore({ memory: true });
+  await stStore.createPlan({
+    _id: "st", joinCode: "ST01",
+    participants: ["+15551230001", "+15551230002"],
+    status: "collecting", slots: {},
+  });
+  check(
+    "status recognises how people actually ask",
+    ["status", "where are we", "who's left", "@unsaid status", "status?"].every(parseStatus) &&
+      !parseStatus("after 7") &&
+      !parseStatus("status of my budget"),
+  );
+  for (const text of ["dinner?", "bushwick", "vegetarian", "none", "none", "after 7", "an hour", "$25 tops"]) {
+    await handleDM({ planId: "st", userId: "+15551230001", text }, stStore);
+  }
+  const report = await planStatus(stStore, "st", "+15551230001");
+  check("status names the plan and its state", report.includes("ST01") && report.includes("collecting"));
+  check("status marks the caller as you", report.includes("you: ready"));
+  check("status shows others by last four digits only", report.includes("···0002"));
+  check("status says the group figure is partial", report.includes("1 of 2 answered"));
+  check("status reports the caller's own profile", report.includes("Your profile: Bushwick"));
+  check(
+    "status never leaks another person's values",
+    !report.includes("15551230002 ·") && report.split("\n").filter((l) => l.includes("0002")).length === 1,
+  );
+  check(
+    "status handles not being in a plan",
+    (await planStatus(stStore, undefined, "+15559999999")).includes("not in a plan"),
+  );
+  await stStore.close();
 
   // Regressions found once A's router was exercised end to end.
   check(
