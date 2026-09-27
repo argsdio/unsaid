@@ -88,9 +88,12 @@ function seedFromProfile(slots: Slots, user: UserDoc | null): { slots: Slots; us
     seeded.home = { raw: home.label, value: home, confidence: "high" };
     used.push(home.label);
   }
-  if (!seeded.dietary && dietary && dietary.length > 0) {
+  // Seeded even when empty, so someone who already said they eat everything is
+  // not asked again. Only mentioned in the recall line when there is something
+  // to name.
+  if (!seeded.dietary && dietary) {
     seeded.dietary = { raw: dietary.join(", "), value: dietary, confidence: "high" };
-    used.push(dietary.join(" and "));
+    if (dietary.length > 0) used.push(dietary.join(" and "));
   }
   seeded.tags = [...new Set([...(seeded.tags ?? []), ...tastes])];
   seeded.namedSpots = [...new Set([...(seeded.namedSpots ?? []), ...preferredSpots])];
@@ -128,7 +131,9 @@ async function advanceOnboarding(
   } else if (answering === "blackouts") {
     user.profile.blackouts = resolveBlackouts(raw.blackoutRaw ?? text);
   } else if (answering === "preferredSpots") {
-    for (const name of raw.namedSpots ?? [text]) {
+    // "none" here is an answer, not a favourite called none.
+    const declined = /^(none|nope|no|nothing|na|n\/a|skip|not really|cant think of any)\b/i.test(text.trim());
+    for (const name of declined ? [] : (raw.namedSpots ?? [text])) {
       const venue = findVenueByName(name);
       if (venue) user.profile.preferredSpots = [...new Set([...user.profile.preferredSpots, venue.id])];
       else user.profile.tastes = [...new Set([...user.profile.tastes, name.toLowerCase()])];
@@ -161,7 +166,9 @@ async function writeBackProfile(
       changed = true;
     }
   }
-  if (slots.dietary?.value && slots.dietary.value.length > 0) {
+  // An empty array is a real answer ("I eat everything"), so it must persist.
+  // Guarding on length > 0 left the old value in the profile forever.
+  if (Array.isArray(slots.dietary?.value)) {
     if ((next.profile.dietary ?? []).join() !== slots.dietary.value.join()) {
       next.profile.dietary = slots.dietary.value;
       changed = true;
@@ -206,6 +213,7 @@ export async function handleDM(
     return { slots, missing, reply: text };
   }
 
+  let justOnboarded = false;
   if (!stored?.onboardedAt) {
     const rawProfile = await extract(input.text, {
       history,
@@ -217,10 +225,21 @@ export async function handleDM(
       const field = (user.askedProfile ?? []).slice(-1)[0] as ProfileField;
       return reply(PROFILE_QUESTIONS[field], existing, missingSlots(existing));
     }
+    justOnboarded = true;
   }
 
   const user = await store.getUser(input.userId);
   const seeded = seedFromProfile(existing, user);
+
+  // The message that completed onboarding was an answer to a PROFILE question.
+  // Reading it again as a plan answer let "none" (answering "any favourite
+  // places?") resolve as a dietary answer and wipe the dietary profile.
+  if (justOnboarded) {
+    await store.setSlots(input.planId, input.userId, seeded.slots);
+    const missingNow = missingSlots(seeded.slots);
+    const recallNow = seeded.used.length > 0 ? `Using ${seeded.used.join(" and ")} from your profile. ` : "";
+    return reply(recallNow + nextQuestion(missingNow), seeded.slots, missingNow);
+  }
 
   // What we asked last, so a bare "30" lands on the slot in question.
   const expecting = missingSlots(seeded.slots)[0];

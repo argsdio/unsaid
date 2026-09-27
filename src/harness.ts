@@ -309,6 +309,48 @@ async function main(): Promise<void> {
   usedPlans.push(P("a"), P("b"));
   usedUsers.push(U("maya"));
 
+  // Regressions found once A's router was exercised end to end.
+  check(
+    "a short alias does not match inside a longer word",
+    (await resolveHome("i eat everything")).value === null &&
+      (await resolveHome("whatever is fine")).value === null &&
+      (await resolveHome("unless you prefer")).value === null,
+  );
+  check(
+    "real locations still resolve",
+    (await resolveHome("im in bushwick")).value?.label === "Bushwick" &&
+      (await resolveHome("near WTC")).value?.label === "World Trade Center",
+  );
+
+  const mindStore = await openStore({ memory: true });
+  const tell = (planId: string, text: string) =>
+    handleDM({ planId, userId: "mind", text }, mindStore);
+  for (const text of ["dinner friday?", "bushwick", "vegetarian", "none", "none"]) {
+    await tell("mp1", text);
+  }
+  const onboarded = (await mindStore.getUser("mind"))?.profile;
+  check(
+    "the message that completes onboarding is not re-read as a plan answer",
+    onboarded?.dietary?.includes("vegetarian") === true,
+    JSON.stringify(onboarded?.dietary),
+  );
+  check('declining favourites does not store "none" as a taste', onboarded?.tastes.includes("none") === false);
+
+  await tell("mp2", "dinner sunday?");
+  await tell("mp2", "i eat everything");
+  const changed = (await mindStore.getUser("mind"))?.profile.dietary;
+  check(
+    "changing to 'i eat everything' clears the stored dietary need",
+    Array.isArray(changed) && changed.length === 0,
+    JSON.stringify(changed),
+  );
+  const afterChange = await tell("mp3", "dinner monday?");
+  check(
+    "and the next plan seeds it rather than asking again",
+    !afterChange.missing.includes("dietary"),
+  );
+  await mindStore.close();
+
   // setActivePlan must not disturb what onboarding built.
   const joinStore = live;
   await joinStore.upsertUser({

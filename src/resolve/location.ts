@@ -5,10 +5,13 @@ export type Geocoder = (query: string) => Promise<Coords | null>;
 
 const STREET_HINT = /\b\d{1,4}\b.*\b(st|street|ave|avenue|blvd|boulevard|rd|road|pl|place|broadway|park|lane|ln|dr|drive)\b/;
 
-/** Longest alias/place key first, so "east village" wins over "village". */
-const KEYS: string[] = [...Object.keys(PLACES), ...Object.keys(ALIASES)].sort(
-  (a, b) => b.length - a.length,
-);
+// Longest key first, so "east village" wins over "village". Matched on word
+// boundaries, not as bare substrings: without \b the alias "ev" matches inside
+// "everything" and "whatever", and "les" inside "unless" and "please", which
+// silently resolves someone's home to a neighbourhood they never mentioned.
+const KEYS: Array<[string, RegExp]> = [...Object.keys(PLACES), ...Object.keys(ALIASES)]
+  .sort((a, b) => b.length - a.length)
+  .map((key) => [key, new RegExp(`\\b${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`)]);
 
 function canonical(key: string): Coords | undefined {
   const direct = PLACES[key];
@@ -35,8 +38,8 @@ export async function resolveHome(raw: string, geocode?: Geocoder): Promise<Slot
   if (exact) return { raw, value: { ...exact, label: label(text) }, confidence: "high" };
 
   // "i'm near union square", "close to WTC", "right by bushwick"
-  for (const key of KEYS) {
-    if (text.includes(key)) {
+  for (const [key, pattern] of KEYS) {
+    if (pattern.test(text)) {
       const hit = canonical(key);
       if (hit) return { raw, value: { ...hit, label: label(key) }, confidence: "high" };
     }
@@ -52,7 +55,7 @@ export async function resolveHome(raw: string, geocode?: Geocoder): Promise<Slot
   }
 
   for (const [name, centre] of Object.entries(BOROUGHS)) {
-    if (text.includes(name)) {
+    if (new RegExp(`\\b${name}\\b`).test(text)) {
       return { raw, value: { ...centre, label: label(name) }, confidence: "low" };
     }
   }
