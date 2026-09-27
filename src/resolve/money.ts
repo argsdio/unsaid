@@ -36,9 +36,13 @@ export function resolveBudget(raw: string): Slot<number> {
 
   // Otherwise strip times of day and durations before looking for a bare number,
   // so "after 7" is not read as $7 and "30 min away" is not read as $30.
+  // Order matters. The two-number clock must be stripped BEFORE the prefix-word
+  // rule: normalise() turns "7:30" into "7 30", and stripping "around 7" first
+  // leaves a bare 30 that then reads as a budget.
   const cleaned = text
+    .replace(/\b\d{1,2}\s*[:\s]\s*\d{2}\s*(?:am|pm)?\b/g, " ")
+    .replace(/\b\d{1,2}\s*ish\b/g, " ")
     .replace(/\b(?:after|before|at|by|from|until|till|til|around|past)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/g, " ")
-    .replace(/\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/g, " ")
     .replace(/\b\d{1,2}\s*(?:am|pm)\b/g, " ")
     .replace(/\b\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours)\b/g, " ");
 

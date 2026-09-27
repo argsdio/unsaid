@@ -52,18 +52,39 @@ export function extractOffline(text: string, expecting?: ExtractContext["expecti
   if (resolveTravelMin(text).value !== null) raw.travelRaw = text;
   if (resolveBlackouts(text).length > 0) raw.blackoutRaw = text;
 
+  // budgetRaw and travelRaw come from resolvers that will claim almost any bare
+  // number, so on a brief answer they may only fill the slot actually being
+  // asked about. That is how "around 7:30" became a $30 budget and "60th and
+  // lex" became $60.
+  //
+  // The non-greedy slots need recognisable words, so they stay allowed from any
+  // brief answer -- somebody correcting "i eat everything" while being asked the
+  // time must still be heard.
   if (brief && expecting) {
-    const only: RawSlots = {};
-    if (expecting === "budgetCapUSD" && raw.budgetRaw) only.budgetRaw = raw.budgetRaw;
-    if (expecting === "maxTravelMin" && raw.travelRaw) only.travelRaw = raw.travelRaw;
-    if (expecting === "window" && raw.windowRaw) only.windowRaw = raw.windowRaw;
-    if (expecting === "dietary" && raw.dietaryRaw) only.dietaryRaw = raw.dietaryRaw;
-    if (expecting === "blackouts" && raw.blackoutRaw) only.blackoutRaw = raw.blackoutRaw;
-    if (Object.keys(only).length > 0) return only;
+    const field = RAW_FIELD[expecting];
+    const trimmed: RawSlots = {};
+    for (const [key, value] of Object.entries(raw)) {
+      if (GREEDY_FIELDS.has(key) && key !== field) continue;
+      (trimmed as Record<string, unknown>)[key] = value;
+    }
+    return trimmed;
   }
 
   return raw;
 }
+
+// Which raw field each slot answer belongs in. `home` was missing, which is why
+// "60th and lex" leaked its 60 into the budget.
+const RAW_FIELD: Record<NonNullable<ExtractContext["expecting"]>, keyof RawSlots> = {
+  home: "homeRaw",
+  window: "windowRaw",
+  maxTravelMin: "travelRaw",
+  dietary: "dietaryRaw",
+  budgetCapUSD: "budgetRaw",
+  blackouts: "blackoutRaw",
+};
+
+const GREEDY_FIELDS = new Set<string>(["budgetRaw", "travelRaw"]);
 
 const STRING_FIELDS = [
   "budgetRaw",
