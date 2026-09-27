@@ -1,9 +1,11 @@
+import "dotenv/config";
 import { readFileSync } from "node:fs";
 import type { Candidate, Evaluation, MergedConstraints, PlanDoc } from "./contracts.ts";
 import { MERGED_KEYS } from "./contracts.ts";
 import { type Participant, hasOverlap, mergeConstraints, travelProfiles } from "./aggregator.ts";
 import { type RawSlots, resolveBudget, resolveDietary, resolveHome, resolveSlots } from "./resolve/index.ts";
 import { scoreCandidates } from "./agent/score.ts";
+import { handleDM } from "./slots.ts";
 import { VENUES, filterVenues, venueById } from "./venues.ts";
 import { DEMO_PLAN_ID, DEMO_ROUNDS } from "./backroom/fixtures.ts";
 import { buildState } from "./backroom/state.ts";
@@ -220,8 +222,57 @@ async function main(): Promise<void> {
   check("'cheap' resolves to a number", typeof resolveBudget("cheap").value === "number");
   check("'$25 tops' resolves to 25", resolveBudget("$25 tops, kinda broke rn").value === 25);
 
+  // handleDM: the function A calls once per inbound message.
+  const dmStore = await openStore({ memory: true });
+  const conversation = [
+    "im in bushwick",
+    "$25 tops",
+    "vegetarian",
+    "after 7",
+    "i dont mind traveling",
+  ];
+
+  console.log("\nhandleDM CONVERSATION");
+  let lastMissing: string[] = [];
+  let firstReply = "";
+  for (const [i, text] of conversation.entries()) {
+    const turn = await handleDM({ planId: "plan-dm", userId: "test-maya", text }, dmStore);
+    if (i === 0) firstReply = turn.reply;
+    lastMissing = [...turn.missing];
+    console.log(`  "${text}"`.padEnd(30) + `-> missing ${turn.missing.length}: ${turn.reply}`);
+  }
+
+  const filled = await dmStore.getSlots("plan-dm", "test-maya");
+  check("first message leaves slots still missing", firstReply.includes("?"));
+  check("location resolved from a DM", filled.home?.value !== null && filled.home !== undefined);
+  check("budget resolved to 25 from '$25 tops'", filled.budgetCapUSD?.value === 25);
+  check("dietary accumulated, not overwritten", filled.dietary?.value?.includes("vegetarian") === true);
+  check("every required slot filled after 5 messages", lastMissing.length === 0, `(${lastMissing.join(",")})`);
+  check("slots were persisted to the store", Object.keys(filled).length >= 5);
+
+  // The standing profile seeds a NEW plan, and an explicit answer still wins.
+  await dmStore.upsertUser({
+    _id: "test-dev",
+    phone: "+1555",
+    profile: {
+      home: { lat: 40.7127, lng: -74.0134, label: "World Trade Center" },
+      defaultBudgetUSD: 60,
+      tastes: ["pizza"],
+      preferredSpots: ["joes-pizza"],
+    },
+    wishlist: [],
+  });
+  const seeded = await handleDM({ planId: "plan-dm2", userId: "test-dev", text: "$25 tops" }, dmStore);
+  check(
+    "standing profile seeds a fresh plan",
+    seeded.slots.home?.value?.label === "World Trade Center",
+  );
+  check("an explicit answer beats the seeded default", seeded.slots.budgetCapUSD?.value === 25);
+  check("seeded profile tastes reach the soft signals", seeded.slots.tags?.includes("pizza") === true);
+  await dmStore.close();
+
   // Plan CRUD. A's join flow depends on every one of these.
-  const planStore = await openStore();
+  const planStore = await openStore({ memory: true });
   const plan: PlanDoc = {
     _id: "plan-1",
     joinCode: "K7M2",
@@ -262,8 +313,9 @@ async function main(): Promise<void> {
   );
   await planStore.close();
 
-  // The backroom screen, checked without binding a port.
-  const store = await openStore();
+  // The backroom screen, checked without binding a port. Memory-backed so
+  // repeated runs do not accumulate DEMO_ROUNDS in a persistent store.
+  const store = await openStore({ memory: true });
   for (const round of DEMO_ROUNDS) await store.appendRound(round);
   const state = await buildState(store, DEMO_PLAN_ID);
   const first = state.rounds[0];
@@ -285,6 +337,29 @@ async function main(): Promise<void> {
   );
   check("projector page polls /api/state", page.includes("/api/state"));
   await store.close();
+
+  if (process.env.MONGODB_URI) {
+    const atlas = await openStore();
+    const probeId = `probe-${Date.now().toString(36)}`;
+    const created = await atlas.createPlan({
+      _id: probeId,
+      joinCode: probeId.slice(-4),
+      participants: ["probe"],
+      status: "collecting",
+      slots: {},
+    });
+    await atlas.setSlots(probeId, "probe", { tags: ["atlas"] });
+    const readBack = await atlas.getSlots(probeId, "probe");
+    const found = await atlas.getPlanByJoinCode(probeId.slice(-4));
+    await atlas.setStatus(probeId, "confirmed");
+    await atlas.close();
+    check(
+      "MongoDB: plan written, slots read back, code resolved",
+      created && readBack.tags?.[0] === "atlas" && found?._id === probeId,
+    );
+  } else {
+    console.log("  SKIP  MongoDB check (MONGODB_URI not set, running in memory)");
+  }
 
   console.log(
     failures === 0 ? "\nAll checks passed.\n" : `\n${failures} check(s) failed.\n`,

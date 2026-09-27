@@ -172,7 +172,9 @@ async function mongoStore(uri: string): Promise<Store> {
   };
 }
 
-export async function openStore(): Promise<Store> {
+// `memory: true` forces the in-memory store even when MONGODB_URI is set, so
+// tests of store behaviour stay deterministic and idempotent.
+export async function openStore(opts: { memory?: boolean } = {}): Promise<Store> {
   const uri = process.env.MONGODB_URI;
-  return uri ? mongoStore(uri) : memoryStore();
+  return uri && !opts.memory ? mongoStore(uri) : memoryStore();
 }
