@@ -26,14 +26,30 @@ export function resolveBudget(raw: string): Slot<number> {
   const text = normalise(raw);
   if (!text) return { raw, value: null, confidence: "low" };
 
-  const range = text.match(/(\d+)\s*(?:-|to|through)\s*(\d+)/);
+  // An explicit currency marker beats everything: in "after 7, an hour away, $30"
+  // the budget is 30, not 7.
+  const marked = text.match(/\$\s*(\d+)/) ?? text.match(/(\d+)\s*(?:dollars|bucks|usd)\b/);
+  if (marked?.[1]) {
+    const n = Number(marked[1]);
+    if (n >= 1 && n <= 5000) return { raw, value: n, confidence: "high" };
+  }
+
+  // Otherwise strip times of day and durations before looking for a bare number,
+  // so "after 7" is not read as $7 and "30 min away" is not read as $30.
+  const cleaned = text
+    .replace(/\b(?:after|before|at|by|from|until|till|til|around|past)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/g, " ")
+    .replace(/\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/g, " ")
+    .replace(/\b\d{1,2}\s*(?:am|pm)\b/g, " ")
+    .replace(/\b\d+\s*(?:min|mins|minute|minutes|hr|hrs|hour|hours)\b/g, " ");
+
+  const range = cleaned.match(/(\d+)\s*(?:-|to|through)\s*(\d+)/);
   if (range?.[2]) return { raw, value: Number(range[2]), confidence: "high" };
 
   if (OPEN_PHRASES.some((p) => text.includes(p))) {
     return { raw, value: 500, confidence: "high" };
   }
 
-  const single = text.match(/(\d+)/);
+  const single = cleaned.match(/(\d+)/);
   if (single?.[1]) {
     const n = Number(single[1]);
     if (n >= 8 && n <= 500) return { raw, value: n, confidence: "high" };

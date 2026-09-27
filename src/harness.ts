@@ -310,6 +310,45 @@ async function main(): Promise<void> {
   usedPlans.push(P("a"), P("b"));
   usedUsers.push(U("maya"));
 
+  // A budget must not be read out of a time or a duration. "after 7" gave 7,
+  // which tripped the $8 floor and silently returned null, so a message naming
+  // three things only filled two.
+  const budgetCases: Array<[string, number | null]> = [
+    ["I can eat after 7, an hour away, $30", 30],
+    ["after 7, 30 min away, 25", 25],
+    ["40 bucks", 40],
+    ["anywhere from 20-45 is fine", 45],
+    ["after 7", null],
+    ["30 min", null],
+    ["7pm works", null],
+  ];
+  const wrongBudgets = budgetCases.filter(([input, want]) => resolveBudget(input).value !== want);
+  check(
+    "budget is not read out of a time or a duration",
+    wrongBudgets.length === 0,
+    wrongBudgets.map(([i]) => JSON.stringify(i)).join(" "),
+  );
+
+  const multiStore = await openStore({ memory: true });
+  await multiStore.upsertUser({
+    _id: "multi", phone: "multi",
+    profile: { home: { lat: 40.69, lng: -73.92, label: "Bushwick" }, tastes: [], preferredSpots: [] },
+    onboardedAt: "now", wishlist: [],
+  });
+  await handleDM({ planId: "mp", userId: "multi", text: "dinner friday?" }, multiStore);
+  const triple = await handleDM(
+    { planId: "mp", userId: "multi", text: "I can eat after 7, an hour away, $30" },
+    multiStore,
+  );
+  check(
+    "one message naming time, travel and budget fills all three",
+    triple.slots.window?.value !== null &&
+      triple.slots.maxTravelMin?.value === 60 &&
+      triple.slots.budgetCapUSD?.value === 30,
+    `missing: [${triple.missing.join(", ")}]`,
+  );
+  await multiStore.close();
+
   // The status command: the thing that makes every other bug debuggable.
   const stStore = await openStore({ memory: true });
   await stStore.createPlan({
